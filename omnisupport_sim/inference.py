@@ -16,7 +16,7 @@ MODEL_NAME = os.getenv("MODEL_NAME", "qwen3.5-4b-python-coder")
 ENV_URL = os.getenv("ENV_URL", "https://markjoseph2003-metahacky.hf.space")
 TIMEOUT_MINUTES = 19  # Must complete under 20 min
 
-client = OpenAI(base_url=API_BASE_URL, api_key=os.getenv("LM_API_KEY", "lm-studio"))
+client = OpenAI(base_url=API_BASE_URL, api_key=os.getenv("HF_TOKEN"))
 
 SYSTEM_PROMPT = """You are a Tier-2 Support Specialist AI agent. You solve customer support tickets by using tools.
 
