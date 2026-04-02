@@ -14,7 +14,7 @@ A High-Fidelity **OpenEnv** for Multi-Tool Support Agents.
 
 ![OmniSupport Dashboard](https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&q=80&w=1200 "Mission Control Dashboard")
 
-*(Note to Judges: We have built a custom, real-time visual UI for this OpenEnv. You can physically watch agents navigate the environment by visiting the `/web` endpoint of this Space: [Live Dashboard](https://huggingface.co/spaces/markjoseph2003/metahacky/web))*
+*(Note to Judges: We have built a custom, real-time visual UI for this OpenEnv. You can physically watch agents navigate the environment by visiting the `/web` endpoint of this Space: [Live Dashboard](https://markjoseph2003-metahacky.hf.space/web))*
 
 ---
 
@@ -71,7 +71,7 @@ To test the environment against an LLM locally (or reproduce our baseline):
 ### 3. Mission Control Dashboard (Live UI)
 To make grading transparent, we built a frontend web portal that dynamically visualizes the LLM's thought process and cumulative score!
 
-👉 **[Launch OpenEnv Mission Control](https://huggingface.co/spaces/markjoseph2003/metahacky/web)**
+👉 **[Launch OpenEnv Mission Control](https://markjoseph2003-metahacky.hf.space/web)**
 
 * Run `inference.py` in your terminal.
 * Keep the dashboard open in your browser.
