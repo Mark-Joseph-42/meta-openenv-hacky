@@ -63,6 +63,13 @@ async def get_state():
 async def health():
     return {"status": "healthy", "env_id": "omnisupport-sim-v1"}
 
+
+@app.get("/")
+async def root():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/docs")
+
+
 # ── Serve frontend if available ──
 frontend_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 if os.path.exists(frontend_path):
