@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+omnisupport_sim/outputs/
+*.pdf
+*.zip
