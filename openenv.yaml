@@ -1,0 +1,17 @@
+spec_version: 1
+name: omnisupport-sim
+env_id: omnisupport-sim-v1
+submission_tag: openenv
+type: environment
+task_ids:
+  - order_check
+  - refund_logic
+  - fraud_mitigation
+runtime:
+  port: 8000
+  resources:
+    cpu: 2
+    memory: 8GB
+app:
+  module: server.app
+  variable: app
