@@ -33,10 +33,11 @@ class StepRequest(BaseModel):
 
 
 @app.post("/reset")
-async def reset(request: ResetRequest):
+async def reset(request: Optional[ResetRequest] = None):
     """Reset the environment for a new episode."""
+    req = request or ResetRequest()
     try:
-        result = env.reset(task_id=request.task_id)
+        result = env.reset(task_id=req.task_id)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -62,13 +63,6 @@ async def get_state():
 @app.get("/health")
 async def health():
     return {"status": "healthy", "env_id": "omnisupport-sim-v1"}
-
-
-@app.get("/")
-async def root():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/docs")
-
 
 # ── Serve frontend if available ──
 frontend_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
