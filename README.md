@@ -121,4 +121,33 @@ To make grading transparent, we built a frontend web portal that dynamically vis
 * Watch the Reward Signal Breakdown bars adjust in real-time as the agent processes tool calls!
 
 ---
+
+## 🏆 Hackathon Rubric Alignment
+
+To assist evaluators in reviewing the environment, here is an objective breakdown of how **OmniSupport-Sim** fulfills the Round 1 constraints:
+
+### 1. Real-World Utility
+* **Requirement:** Must simulate a task humans actually do, avoiding toys or games.
+* **Implementation:** The environment directly models a Tier-2 Support CRM focusing on **SOP (Standard Operating Procedure) Compliance**. It evaluates an agent's ability to cross-reference multiple tools (e.g., verifying return tracking logs before issuing refunds), a critical capability for deploying safe enterprise customer service agents.
+
+### 2. Task & Grader Quality
+* **Requirement:** 3+ tasks with a difficulty range, programmatic deterministic graders, returning `0.0 - 1.0` scores.
+* **Implementation:** Tested via deterministic Python functions (`server/graders.py`):
+    * **Easy (Status Resolution):** Evaluates if the agent accurately fetched and localized active order data.
+    * **Medium (SOP Compliance):** Features partial point allocation (e.g., fetching policy logic grants 0.4). Implements an aggressive *0.0 override* if the agent hallucinates a refund for an ineligible item.
+    * **Hard (Conflict Reconciliation):** Checks multi-hop tool-chaining by enforcing that the agent queries the Carrier API utilizing tracking parameters parsed from prior DB tools before taking action.
+
+### 3. Environment Design
+* **Requirement:** Meaningful dense rewards capturing partial progress, typed models.
+* **Implementation:** 
+    * **Dense Rewards:** Uses a weighted boundary step reward (`-2.0` to `1.0`). Introduces `R_prog` (+0.1 for extracting novel Key-Value pairs, incentivizing tool investigation) alongside `R_pen` (-0.5 per SOP violation, penalizing rash mutations over verification).
+    * **Structure:** All interactions are processed through strict subset Pydantic models (`OmniSupportObservation`, `SearchDB`, `VerifyPolicy`, `ExecuteAction`).
+
+### 4. Code Quality & Spec Compliance
+* **Requirement:** OpenEnv specification alignment, baseline reproducible scripts.
+* **Implementation:**
+    * Passes the `openenv validate` evaluation constraint.
+    * The included `inference.py` perfectly utilizes the required `[START]`, `[STEP]`, and `[END]` STDOUT structured log pipelines to integrate closely with automated hackathon testing wrappers.
+
+---
 *Built for the Scaler x Meta PyTorch Hackathon (April 2026).*

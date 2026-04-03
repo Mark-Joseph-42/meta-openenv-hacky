@@ -1,51 +1,89 @@
 """
 Baseline inference script for OmniSupport-Sim.
-Uses OpenAI-compatible API (LM Studio locally, cloud at runtime).
-Mandatory [START]/[STEP]/[END] logging protocol.
+Compliant with OpenEnv stdout logging protocols.
 """
-import os
+import asyncio
 import json
-import time
-import signal
-import requests
+import os
+import textwrap
+from typing import List, Optional
+
 from openai import OpenAI
 
+from client import OmniSupportEnv
+
 # ── Configuration ──
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:1234/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen3.5-4b-python-coder")
-ENV_URL = os.getenv("ENV_URL", "https://markjoseph2003-metahacky.hf.space")
+API_BASE_URL = os.getenv("API_BASE_URL") or "http://localhost:1234/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "qwen3.5-4b-python-coder"
+IMAGE_NAME = os.getenv("IMAGE_NAME") or "omnisupport-sim:latest"
+API_KEY = os.getenv("HF_TOKEN") or "dummy-key"
+ENV_URL = os.getenv("ENV_URL", "http://localhost:8000") # used if not using docker
+BENCHMARK = os.getenv("OMNISUPPORT_BENCHMARK", "omnisupport_sim")
+TASK_NAME = os.getenv("OMNISUPPORT_TASK", "order_check")
+
 TIMEOUT_MINUTES = 19  # Must complete under 20 min
+MAX_STEPS = 10
+SUCCESS_SCORE_THRESHOLD = 0.5
 
-client = OpenAI(base_url=API_BASE_URL, api_key=os.getenv("HF_TOKEN"))
+client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-SYSTEM_PROMPT = """You are a Tier-2 Support Specialist AI agent. You solve customer support tickets by using tools.
+SYSTEM_PROMPT = textwrap.dedent(
+    """
+    You are a Tier-2 Support Specialist AI agent. You solve customer support tickets by using tools.
 
-Available tools:
-1. SearchDB(query): Search the order/customer database. Use this to find order details.
-2. VerifyPolicy(topic): Check company policy rules. Topics: refund_eligibility, escalation_protocol, return_verification, shipping_change, fraud_investigation
-3. ExecuteAction(cmd, params): Execute an action. Commands: issue_refund, change_shipping. Params must include order_id.
-4. FinalResponse(text): Close the ticket with a response to the customer.
+    Available tools:
+    1. SearchDB(query): Search the order/customer database. Use this to find order details.
+    2. VerifyPolicy(topic): Check company policy rules. Topics: refund_eligibility, escalation_protocol, return_verification, shipping_change, fraud_investigation
+    3. ExecuteAction(cmd, params): Execute an action. Commands: issue_refund, change_shipping. Params must include order_id.
+    4. FinalResponse(text): Close the ticket with a response to the customer.
 
-CRITICAL RULES (SOP):
-- ALWAYS call VerifyPolicy BEFORE issuing any refund
-- For returns: ALWAYS verify carrier delivery status via SearchDB with tracking_id BEFORE refunding
-- Never hallucinate information — only use data from tool outputs
-- Respond with EXACTLY ONE tool call per turn as JSON
+    CRITICAL RULES (SOP):
+    - ALWAYS call VerifyPolicy BEFORE issuing any refund
+    - For returns: ALWAYS verify carrier delivery status via SearchDB with tracking_id BEFORE refunding
+    - Never hallucinate information — only use data from tool outputs
+    - Respond with EXACTLY ONE tool call per turn as JSON
 
-Respond with a JSON object like:
-{"action_type": "search_db", "query": "cust_882"}
-or {"action_type": "verify_policy", "topic": "refund_eligibility"}
-or {"action_type": "execute_action", "cmd": "issue_refund", "params": {"order_id": 4829}}
-or {"action_type": "final_response", "text": "Your refund has been processed."}
-"""
+    Respond with a JSON object like:
+    {"action_type": "search_db", "query": "cust_882"}
+    or {"action_type": "verify_policy", "topic": "refund_eligibility"}
+    or {"action_type": "execute_action", "cmd": "issue_refund", "params": {"order_id": 4829}}
+    or {"action_type": "final_response", "text": "Your refund has been processed."}
+    """
+).strip()
 
 
-def llm_decide(observation: dict) -> dict:
-    """Ask the LLM to decide the next action based on the observation."""
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+
+
+def llm_decide(observation: dict, error_msg: Optional[str]) -> str:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Current ticket observation:\n{json.dumps(observation, indent=2)}\n\nWhat is your next action? Respond with JSON only."}
     ]
+    if error_msg:
+        messages.append({
+            "role": "user",
+            "content": f"Current ticket observation:\n{json.dumps(observation, indent=2)}\n\nThe last action resulted in an error:\n{error_msg}\n\nWhat is your next action? Respond with JSON only."
+        })
+    else:
+        messages.append({
+            "role": "user",
+            "content": f"Current ticket observation:\n{json.dumps(observation, indent=2)}\n\nWhat is your next action? Respond with JSON only."
+        })
 
     try:
         response = client.chat.completions.create(
@@ -53,104 +91,95 @@ def llm_decide(observation: dict) -> dict:
             messages=messages,
             temperature=0.1,
             max_tokens=500,
+            stream=False,
         )
-        content = response.choices[0].message.content.strip()
+        content = (response.choices[0].message.content or "").strip()
         # Extract JSON from response (handle markdown code blocks)
         if "```" in content:
             content = content.split("```")[1]
             if content.startswith("json"):
                 content = content[4:]
             content = content.strip()
+        # Test parse
         action = json.loads(content)
-        return action
+        return json.dumps(action) # ensure single line format for stdout string
     except Exception as e:
-        # Fallback: close ticket if LLM fails
-        return {"action_type": "final_response", "text": f"Unable to process at this time. Error: {str(e)}"}
+        # Fallback closure if JSON parse or LLM fails
+        default_action = {"action_type": "final_response", "text": f"Unable to process at this time. Error: {str(e)}"}
+        return json.dumps(default_action)
 
 
-def env_reset(task_id: str) -> dict:
-    """Call environment reset endpoint."""
-    resp = requests.post(f"{ENV_URL}/reset", json={"task_id": task_id})
-    resp.raise_for_status()
-    return resp.json()
+async def main() -> None:
+    # Use From Docker method if env var IMAGE_NAME exists, else hit local env
+    if os.getenv("USE_DOCKER") or os.getenv("IMAGE_NAME", "") != "omnisupport-sim:latest":
+        import openenv.core
+        env = await OmniSupportEnv.from_docker_image(IMAGE_NAME, env={"OMNISUPPORT_TASK": TASK_NAME})
+    else:
+        env = OmniSupportEnv(base_url=ENV_URL)
 
+    history = []
+    rewards = []
+    steps_taken = 0
+    score = 0.0
+    success = False
 
-def env_step(action: dict) -> dict:
-    """Call environment step endpoint."""
-    resp = requests.post(f"{ENV_URL}/step", json=action)
-    resp.raise_for_status()
-    return resp.json()
+    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
+    try:
+        result = await env.reset()
+        
+        last_obs = result.observation.model_dump()
+        last_error = None
+        
+        for step in range(1, MAX_STEPS + 1):
+            if result.done:
+                break
 
-def env_state() -> dict:
-    """Get environment state."""
-    resp = requests.get(f"{ENV_URL}/state")
-    resp.raise_for_status()
-    return resp.json()
+            action_json_str = llm_decide(last_obs, last_error)
 
+            try:
+                # The model validation helps us catch bad formatting instantly
+                action_obj = OmniSupportEnv.action_type.model_validate_json(action_json_str)
+                result = await env.step(action_obj)
+                
+                obs = result.observation.model_dump()
+                reward = result.reward or 0.0
+                done = result.done
+                error = None
+            except Exception as e:
+                obs = last_obs
+                reward = 0.0
+                done = False
+                error = str(e).replace("\n", " ") # Keep error on single line
 
-def run_task(task_id: str) -> float:
-    """Run a single task with [START]/[STEP]/[END] logging."""
-    print(f"[START] task_id={task_id}")
+            rewards.append(reward)
+            steps_taken = step
+            last_obs = obs
+            last_error = error
 
-    result = env_reset(task_id)
-    max_steps = 10  # Safety limit
+            # Clean action logs for 1-liner STDOUT constraint
+            clean_action_str = action_json_str.replace("\n", "").replace("\r", "")
+            log_step(step=step, action=clean_action_str, reward=reward, done=done, error=error)
 
-    for step_num in range(max_steps):
-        observation = result.get("observation", {})
-        action = llm_decide(observation)
+            if done:
+                # In your previous logic, you used the total_reward / score logic, simplified here:
+                score = sum(rewards)
+                success = score >= SUCCESS_SCORE_THRESHOLD
+                break
 
-        log_entry = {
-            "step": step_num + 1,
-            "action": action,
-            "observation_summary": {
-                "ticket_id": observation.get("ticket_id"),
-                "has_tool_output": observation.get("last_tool_output") is not None,
-            }
-        }
-        print(f"[STEP] {json.dumps(log_entry)}")
-
-        result = env_step(action)
-
-        if result.get("done", False):
-            break
-
-    # Get final state and score
-    final_state = env_state()
-    score = result.get("info", {}).get("total_reward", 0.0)
-
-    print(f"[END] task_id={task_id} score={score}")
-    return score
-
-
-def main():
-    """Run all 3 tasks within timeout."""
-    start_time = time.time()
-    task_ids = ["order_check", "refund_logic", "fraud_mitigation"]
-    scores = {}
-
-    for task_id in task_ids:
-        elapsed = time.time() - start_time
-        if elapsed > TIMEOUT_MINUTES * 60:
-            print(f"[ERROR] Timeout exceeded ({TIMEOUT_MINUTES} min). Skipping remaining tasks.")
-            break
-
+    finally:
         try:
-            scores[task_id] = run_task(task_id)
+            await env.close()
         except Exception as e:
-            print(f"[ERROR] Task {task_id} failed: {e}")
-            scores[task_id] = 0.0
-
-    # Summary
-    total_time = time.time() - start_time
-    avg_score = sum(scores.values()) / len(scores) if scores else 0.0
-    print(f"\n{'='*50}")
-    print(f"EVALUATION COMPLETE")
-    print(f"Tasks: {json.dumps(scores, indent=2)}")
-    print(f"Average Score: {avg_score:.2f}")
-    print(f"Total Time: {total_time:.1f}s ({total_time/60:.1f} min)")
-    print(f"{'='*50}")
+            print(f"[DEBUG] env.close() error: {e}", flush=True)
+            
+        # final fallback score set if broke out early
+        if score == 0.0 and len(rewards) > 0:
+            score = sum(rewards)
+            success = score >= SUCCESS_SCORE_THRESHOLD
+            
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
