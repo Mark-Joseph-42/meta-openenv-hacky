@@ -14,11 +14,14 @@ def grade_task_1(state: dict) -> float:
     db_snapshot = state.get("db_snapshot", {})
     orders = db_snapshot.get("orders", [])
 
-    # Find the most recent order (by purchase_date)
-    if not orders:
+    # Task 1 scenario is about Alex Rivera (cust_882)
+    target_customer_id = "cust_882"
+    relevant_orders = [o for o in orders if o.get("customer_id") == target_customer_id]
+    
+    if not relevant_orders:
         return 0.0
 
-    most_recent = max(orders, key=lambda o: o.get("purchase_date", ""))
+    most_recent = max(relevant_orders, key=lambda o: o.get("purchase_date", ""))
     expected_status = most_recent["status"]
 
     # Find the FinalResponse action
@@ -57,13 +60,16 @@ def grade_task_2(state: dict) -> float:
         score += 0.4
 
     # ── Determine ground truth: is the item eligible? ──
+    # ── Check for illegal refunds (Hallucination) ──
     # Task 2 scenario: order 4829 (Wireless Headphones, $89.99, purchased 2026-03-25)
-    # Eligible: < 14 days AND < $500 → YES
-    target_order = None
+    target_order_id = 4829
     for order in db_snapshot.get("orders", []):
-        if order["order_id"] == 4829:
+        # We only care about the target order for this scenario
+        if order["order_id"] == target_order_id:
             target_order = order
-            break
+        elif order.get("refund_status") == "SUCCESS":
+            # Agent refunded something OTHER than what was requested
+            return 0.0
 
     if target_order is None:
         return score
@@ -126,13 +132,15 @@ def grade_task_3(state: dict) -> float:
                 if expected_tracking_id in query:
                     carrier_called_correctly = True
 
-    # ── Check refund status in DB ──
+    # ── Check for illegal refunds (Hallucination) ──
     refund_success = False
     for order in db_snapshot.get("orders", []):
         if order["order_id"] == expected_order_id:
             if order.get("refund_status") == "SUCCESS":
                 refund_success = True
-            break
+        elif order.get("refund_status") == "SUCCESS":
+            # Agent refunded the wrong order entirely
+            return 0.0
 
     # ── CRITICAL: 0.0 override if refund without carrier check ──
     if refund_success and not carrier_called:

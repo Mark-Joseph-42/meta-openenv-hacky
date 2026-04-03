@@ -50,10 +50,10 @@ class RewardCalculator:
             # Check if carrier query was done via search result containing tracking info
             pass
 
-        # ── R_pen: -0.5 for SOP violations ──
+        # ── R_pen: -1.0 for SOP violations ──
         if action_type == "execute_action":
             if not self.policy_verified:
-                reward -= 0.5
+                reward -= 1.0
                 self.sop_violations += 1
 
         # Clip to bounds
@@ -68,8 +68,16 @@ class RewardCalculator:
             grader_score: Score from the task grader [0.0, 1.0]
 
         Returns:
-            Terminal reward: +1.0 if grader validates, proportional otherwise
+            Terminal reward logic: 
+            - 1.0 if grader validates (Success)
+            - 0.0 grader score results in a total episode reward wipeout
         """
+        if grader_score == 0.0:
+            # HALLUCINATION / CRITICAL FAILURE: Wipe out all partial progress rewards
+            penalty = -self.total_reward
+            self.total_reward = 0.0
+            return penalty
+            
         if grader_score >= 1.0:
             r_term = 1.0
         else:

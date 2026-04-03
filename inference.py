@@ -110,11 +110,12 @@ def llm_decide(observation: dict, error_msg: Optional[str]) -> str:
 
 
 async def main() -> None:
-    # Use From Docker method if env var IMAGE_NAME exists, else hit local env
-    if os.getenv("USE_DOCKER") or os.getenv("IMAGE_NAME", "") != "omnisupport-sim:latest":
+    # Use From Docker method if explicitly requested, else hit local env
+    if os.getenv("USE_DOCKER"):
         import openenv.core
         env = await OmniSupportEnv.from_docker_image(IMAGE_NAME, env={"OMNISUPPORT_TASK": TASK_NAME})
     else:
+        # Default to local server (useful for local development/testing)
         env = OmniSupportEnv(base_url=ENV_URL)
 
     history = []
@@ -138,8 +139,11 @@ async def main() -> None:
             action_json_str = llm_decide(last_obs, last_error)
 
             try:
-                # The model validation helps us catch bad formatting instantly
-                action_obj = OmniSupportEnv.action_type.model_validate_json(action_json_str)
+                # Use TypeAdapter for standard Pydantic V2 Union validation
+                from pydantic import TypeAdapter
+                adapter = TypeAdapter(OmniSupportEnv.action_type)
+                action_obj = adapter.validate_json(action_json_str)
+                
                 result = await env.step(action_obj)
                 
                 obs = result.observation.model_dump()
