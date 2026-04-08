@@ -64,19 +64,22 @@ ENV_URL = args.url_arg or os.getenv("ENV_URL", "http://localhost:8000")
 BENCHMARK = os.getenv("OMNISUPPORT_BENCHMARK", "omnisupport_sim")
 
 # ── Configuration — exactly matches judge's sample inference script ──
-# Priority: env vars always win (judge injects these). Local dev falls back to LM Studio.
+# Priority: 'API_KEY' (injected by judge) must come FIRST.
+# In HF Spaces, 'HF_TOKEN' is auto-set but might point to the Hub, not the proxy.
 API_BASE_URL = os.getenv("API_BASE_URL") or "http://localhost:1234/v1"
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "dummy-key"
+API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN") or "dummy-key"
 MODEL_NAME = os.getenv("MODEL_NAME") or "gpt-4o-mini"
 
-# ── ALL 3 Tasks — must match openenv.yaml task_ids ──
-TASK_IDS = ["order_check", "refund_logic", "fraud_mitigation"]
+# ── ALL 5 Tasks — must match openenv.yaml task_ids ──
+TASK_IDS = ["order_check", "refund_logic", "fraud_mitigation", "fraud_prevention", "escalation_required"]
 
 TIMEOUT_MINUTES = 19  # Hard limit: evaluator kills after 20 min
 MAX_STEPS = 15
 SUCCESS_SCORE_THRESHOLD = 0.5
 
-# client is created inside get_agent_action() to ensure it uses the final resolved credentials.
+# ── Diagnostic Log (visible in stderr, masked for security) ──
+source = "API_KEY (Judge)" if os.getenv("API_KEY") else ("HF_TOKEN (Platform)" if os.getenv("HF_TOKEN") else "Fallback")
+print(f"[DEBUG] API Config Source: {source} | Base: {API_BASE_URL}", file=sys.stderr)
 
 # ── Task-specific system prompts for better SOP compliance ──────────────────
 
