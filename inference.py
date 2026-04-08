@@ -63,16 +63,11 @@ args, unknown = parser.parse_known_args()
 ENV_URL = args.url_arg or os.getenv("ENV_URL", "http://localhost:8000")
 BENCHMARK = os.getenv("OMNISUPPORT_BENCHMARK", "omnisupport_sim")
 
-# ── Configuration: PRIORITY = env vars > CLI args > local dev default ──
-# The hackathon evaluator ALWAYS injects API_BASE_URL and API_KEY as env vars.
-# We MUST use those when present so our calls go through their LiteLLM proxy.
-API_BASE_URL = (
-    os.getenv("API_BASE_URL")           # 1. Evaluator-injected (REQUIRED for judge)
-    or args.api_base                    # 2. CLI override (local testing)
-    or "http://localhost:1234/v1"       # 3. Local LM Studio fallback
-)
-API_KEY = os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY") or args.api_key or "dummy-key"
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+# ── Configuration — exactly matches judge's sample inference script ──
+# Priority: env vars always win (judge injects these). Local dev falls back to LM Studio.
+API_BASE_URL = os.getenv("API_BASE_URL") or "http://localhost:1234/v1"
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "dummy-key"
+MODEL_NAME = os.getenv("MODEL_NAME") or "gpt-4o-mini"
 
 # ── ALL 3 Tasks — must match openenv.yaml task_ids ──
 TASK_IDS = ["order_check", "refund_logic", "fraud_mitigation"]
@@ -81,8 +76,7 @@ TIMEOUT_MINUTES = 19  # Hard limit: evaluator kills after 20 min
 MAX_STEPS = 15
 SUCCESS_SCORE_THRESHOLD = 0.5
 
-client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
+# client is created inside get_agent_action() to ensure it uses the final resolved credentials.
 
 # ── Task-specific system prompts for better SOP compliance ──────────────────
 
@@ -252,6 +246,8 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 
 async def get_agent_action(obs: OmniSupportObservation, history: List[dict], task_name: str = "refund_logic") -> str:
     """Query the LLM and extract a structured action."""
+    # Create client here to guarantee it uses the final resolved env vars
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     messages = [{"role": "system", "content": get_system_prompt(task_name)}]
 
     # Inject conversation history (action + tool result pairs)
