@@ -81,7 +81,9 @@ SYSTEM_PROMPT = textwrap.dedent(
     3. MANDATORY: You MUST use 'verify_policy' for every ticket before taking any action. For Task 3 (Conflict), use 'return_verification'.
     4. Provide a CONCISE and professional FinalResponse when done.
     
-    Example: {"action_type": "search_db", "query": "4829"}
+    EXAMPLES:
+    - {"action_type": "search_db", "query": "4829"}
+    - {"action_type": "final_response", "text": "Refund issued. Details..."}
     """
 ).strip()
 
@@ -179,8 +181,18 @@ async def get_agent_action(obs: OmniSupportObservation, history: List[dict]) -> 
                 
                 # ── Normalization ──
                 if isinstance(action, dict):
+                    # Map common hallucinations like {"final_response": "..."} to {"action_type": "final_response", "text": "..."}
+                    if "final_response" in action and "text" not in action:
+                        action = {"action_type": "final_response", "text": action["final_response"]}
+                    elif "response" in action and "text" not in action:
+                        action = {"action_type": "final_response", "text": action["response"]}
+                    
                     if "action_type" in action:
                         action["action_type"] = action["action_type"].lower()
+                    else:
+                        # If keys are present but action_type is missing, try to infer it
+                        if "text" in action: action["action_type"] = "final_response"
+                        elif "query" in action: action["action_type"] = "search_db"
                     if action.get("action_type") == "search_db" and isinstance(action.get("query"), dict):
                         q = action["query"]
                         action["query"] = str(next(iter(q.values()))) if q else ""
