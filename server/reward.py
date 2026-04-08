@@ -89,7 +89,7 @@ class RewardCalculator:
             self.total_reward = 0.0
             return 0.01
             
-        return grader_score
+        return max(0.01, min(0.99, grader_score))
 
     def _flatten_dict(self, d: dict, parent_key: str = "") -> dict:
         """Flatten a nested dict for KV pair tracking."""

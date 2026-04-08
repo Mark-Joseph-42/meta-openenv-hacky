@@ -63,6 +63,7 @@ def grade_task_2(state: dict) -> float:
     # ── Check for illegal refunds (Hallucination) ──
     # Task 2 scenario: order 4829 (Wireless Headphones, $89.99, purchased 2026-03-25)
     target_order_id = 4829
+    target_order = None
     for order in db_snapshot.get("orders", []):
         # We only care about the target order for this scenario
         if order["order_id"] == target_order_id:

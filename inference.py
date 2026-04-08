@@ -1,26 +1,35 @@
 """
 Baseline inference script for OmniSupport-Sim.
-Compliant with OpenEnv stdout logging protocols.
+Compliant with OpenEnv stdout logging protocol (MANDATORY FORMAT).
+
+STDOUT FORMAT (strictly enforced):
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
+
+Rules:
+  - One [START] line at episode begin.
+  - One [STEP] line per step, immediately after env.step() returns.
+  - One [END] line after env.close(), always emitted (even on exception).
+  - reward and score are formatted to 2 decimal places.
+  - done and success are lowercase booleans: true or false.
+  - error is the raw error string, or null if none.
+  - All fields on a single line with no newlines within a line.
+  - All scores/rewards are strictly in (0, 1) exclusive range.
 """
 import asyncio
 import json
 import os
+import sys
 import textwrap
 from typing import List, Optional
 
 from openai import OpenAI
-import sys
-import os
 
-# ── Dynamic Path Injection (fix ModuleNotFoundError) ──
+# ── Dynamic Path Injection ──
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
-# Also add parent dir if we are inside omnisupport_sim
-parent_dir = os.path.dirname(current_dir)
-if os.path.basename(current_dir) == "omnisupport_sim":
-    if parent_dir not in sys.path:
-        sys.path.insert(0, parent_dir)
 
 from client import OmniSupportEnv
 
@@ -30,25 +39,26 @@ except ImportError:
     try:
         from models import OmniSupportObservation
     except ImportError:
-        # Fallback if pathing still issues
         pass
 
-# ── Configuration ──
-API_BASE_URL = os.getenv("API_BASE_URL") or "http://localhost:1234/v1"
-MODEL_NAME = os.getenv("MODEL_NAME") or "qwen3.5-4b-python-coder"
-IMAGE_NAME = os.getenv("IMAGE_NAME") or "omnisupport-sim:latest"
-API_KEY = os.getenv("HF_TOKEN") or "dummy-key"
+# ── Configuration (Mandatory env vars with sensible cloud defaults) ──
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "dummy-key"
+
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("url_arg", nargs="?", default=None)
-parser.add_argument("--task", default=os.getenv("OMNISUPPORT_TASK", "fraud_mitigation"))
+parser.add_argument("--task", default=None)  # kept for compatibility but overridden by TASK_IDS loop
 args, unknown = parser.parse_known_args()
 
 ENV_URL = args.url_arg or os.getenv("ENV_URL", "http://localhost:8000")
-TASK_NAME = args.task
 BENCHMARK = os.getenv("OMNISUPPORT_BENCHMARK", "omnisupport_sim")
 
-TIMEOUT_MINUTES = 19  # Must complete under 20 min
+# ── ALL 3 Tasks — required by evaluator ──
+TASK_IDS = ["order_check", "refund_logic", "fraud_mitigation"]
+
+TIMEOUT_MINUTES = 19  # Hard limit: evaluator kills after 20 min
 MAX_STEPS = 15
 SUCCESS_SCORE_THRESHOLD = 0.5
 
@@ -57,36 +67,57 @@ client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 SYSTEM_PROMPT = textwrap.dedent(
     """
     You are a Tier-2 Support AI. You solve tickets using JSON tool calls.
-    
+
     TOOLS:
     1. search_db: query (string) - Search orders or tracking IDs.
     2. verify_policy: topic (string) - Topics: refund_eligibility, return_verification.
     3. execute_action: cmd ("issue_refund"), params (dict with order_id).
     4. final_response: text (string) - Professional summary to customer.
-    
+
     FORMATTING CONSTRAINTS:
-    - You MUST NOT use newlines (`\n`) in your FinalResponse.
+    - You MUST NOT use newlines in your FinalResponse.
     - Write your response as a single, concise paragraph using full stops.
-    
+
     FINANCIAL & TIME CONSTRAINTS (Current Date: April 2, 2026):
     - Auto-refunds are STRICTLY limited to $500.
     - Standard customers: Purchase date must be < 14 days ago.
     - LOYALTY-GOLD members: Purchase date must be < 30 days ago.
     - If either limit (Time or Money) is exceeded, you MUST NOT issue a refund.
-    - RISK RULE: If the order has a 'FRAUD FLAG' in the notes, you MUST deny the refund and refer it for fraud investigation.
-    
+    - RISK RULE: If the order has a 'FRAUD FLAG' in the notes, DENY the refund.
+
     STRICT SOP:
-    1. Search Order ID.
-    2. If a tracking_id is found, you MUST search that tracking_id to check Carrier status.
-    3. MANDATORY: You MUST use 'verify_policy' for every ticket before taking any action. For Task 3 (Conflict), use 'return_verification'.
-    4. Provide a CONCISE and professional FinalResponse when done.
-    
+    1. Search Order ID or Customer ID.
+    2. If a tracking_id is found, MUST search that tracking_id to check Carrier status.
+    3. MANDATORY: MUST use 'verify_policy' for every ticket before taking action.
+       For Task 3 (Conflict), use 'return_verification'.
+    4. Provide a CONCISE professional FinalResponse when done.
+
     EXAMPLES:
     - {"action_type": "search_db", "query": "4829"}
+    - {"action_type": "verify_policy", "topic": "refund_eligibility"}
+    - {"action_type": "execute_action", "cmd": "issue_refund", "params": {"order_id": "4829"}}
     - {"action_type": "final_response", "text": "Refund issued. Details..."}
     """
 ).strip()
 
+
+# ── Score Utilities ──────────────────────────────────────────────────────────
+
+def clamp_score(s: float) -> float:
+    """Force score into strictly (0, 1) exclusive range as required by evaluator."""
+    if s <= 0.0:
+        return 0.01
+    if s >= 1.0:
+        return 0.99
+    return round(s, 2)
+
+
+def clamp_reward(r: float) -> float:
+    """Force individual step reward into strictly (0, 1) exclusive range."""
+    return clamp_score(r)
+
+
+# ── Mandatory STDOUT Logging ─────────────────────────────────────────────────
 
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
@@ -95,48 +126,51 @@ def log_start(task: str, env: str, model: str) -> None:
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     error_val = error if error else "null"
     done_val = str(done).lower()
-    
-    # Contextual tag for clarity
-    tag = ""
-    if reward > 0.5: tag = " [BONUS]"
-    elif reward < 0: tag = " [PENALTY]"
-    
+    reward_clamped = clamp_reward(reward)
+    # Strip all newlines from action to keep it on a single line
+    clean_action = action.replace("\n", "").replace("\r", "")
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f}{tag} done={done_val} error={error_val}",
+        f"[STEP] step={step} action={clean_action} reward={reward_clamped:.2f} done={done_val} error={error_val}",
         flush=True,
     )
 
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    status = "SUCCESS" if success else "FAILED (SOP Violation)"
-    print(f"[END] status={status} steps={steps} final_grade={score:.1f} rewards={rewards_str}", flush=True)
+    rewards_clamped = [clamp_reward(r) for r in rewards]
+    score_clamped = clamp_score(score)
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards_clamped)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score_clamped:.2f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
-# Consolidated into get_agent_action
+# ── Agent Logic ───────────────────────────────────────────────────────────────
 
 async def get_agent_action(obs: OmniSupportObservation, history: List[dict]) -> str:
     """Query the LLM and extract a structured action."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    
-    # history contains pairs of {"action": ..., "tool_result": ...}
+
+    # Inject conversation history (action + tool result pairs)
     for entry in history:
         messages.append({"role": "assistant", "content": entry.get("action", "")})
         messages.append({"role": "user", "content": f"Tool Result: {entry.get('tool_result', '')}"})
-    
-    # Add a progress nudge
-    if len(history) > 0:
-        messages.append({"role": "user", "content": f"You are in the middle of a ticket. Analyze the results above and proceed with the SOP."})
 
-    # Add current observation (SLIMMED for local LLM performance)
+    # Nudge if mid-episode
+    if len(history) > 0:
+        messages.append({
+            "role": "user",
+            "content": "You are in the middle of a ticket. Analyze the results above and proceed with the SOP."
+        })
+
+    # Slim observation to conserve tokens for smaller models
     slim_obs = {
         "ticket_id": obs.ticket_id,
         "internal_notes": obs.internal_notes,
-        "last_tool_output": obs.last_tool_output
+        "last_tool_output": obs.last_tool_output,
     }
     messages.append({"role": "user", "content": f"Current Observation: {json.dumps(slim_obs)}"})
 
-    # ── Retry Loop for robustness ──
     max_retries = 3
     last_error = None
 
@@ -146,125 +180,108 @@ async def get_agent_action(obs: OmniSupportObservation, history: List[dict]) -> 
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=1024, # Increased for final response room
+                max_tokens=1024,
                 stream=False,
             )
             content = (response.choices[0].message.content or "").strip()
-            
+
             if not content:
-                # If model is being shy, nudge it
-                messages.append({"role": "user", "content": "CONTINUE. Provide your next action in JSON format based on the tools above."})
+                messages.append({"role": "user", "content": "CONTINUE. Provide your next action in JSON format."})
                 continue
 
-            # ── Extraction & Repair Logic ──
-            cleaned_content = content
-            
-            # Simple Auto-Repair for truncated JSON
-            if cleaned_content.count('"') % 2 != 0:
-                cleaned_content += '"'
-            if cleaned_content.count('{') > cleaned_content.count('}'):
-                cleaned_content += '}'
-            
-            if "```" in cleaned_content:
-                blocks = cleaned_content.split("```")
-                for block in blocks:
+            # ── JSON Extraction & Repair ──
+            cleaned = content
+
+            # Strip markdown code fences
+            if "```" in cleaned:
+                for block in cleaned.split("```"):
                     if "{" in block and "}" in block:
-                        cleaned_content = block
-                        if cleaned_content.startswith("json"):
-                            cleaned_content = cleaned_content[4:]
+                        cleaned = block
+                        if cleaned.startswith("json"):
+                            cleaned = cleaned[4:]
                         break
-            
-            cleaned_content = cleaned_content.strip()
+
+            cleaned = cleaned.strip()
+
+            # Simple auto-repair for truncated JSON
+            if cleaned.count('"') % 2 != 0:
+                cleaned += '"'
+            if cleaned.count("{") > cleaned.count("}"):
+                cleaned += "}"
 
             try:
-                action = json.loads(cleaned_content)
-                
-                # ── Normalization ──
+                action = json.loads(cleaned)
+
+                # ── Normalization: handle common LLM hallucination patterns ──
                 if isinstance(action, dict):
-                    # Map common hallucinations like {"final_response": "..."} to {"action_type": "final_response", "text": "..."}
+                    # Map short-form keys to full action structure
                     if "final_response" in action and "text" not in action:
                         action = {"action_type": "final_response", "text": action["final_response"]}
                     elif "response" in action and "text" not in action:
                         action = {"action_type": "final_response", "text": action["response"]}
-                    
+
+                    # Lowercase action_type
                     if "action_type" in action:
                         action["action_type"] = action["action_type"].lower()
                     else:
-                        # If keys are present but action_type is missing, try to infer it
-                        if "text" in action: action["action_type"] = "final_response"
-                        elif "query" in action: action["action_type"] = "search_db"
+                        # Infer action_type from present keys
+                        if "text" in action:
+                            action["action_type"] = "final_response"
+                        elif "query" in action:
+                            action["action_type"] = "search_db"
+                        elif "topic" in action:
+                            action["action_type"] = "verify_policy"
+                        elif "cmd" in action:
+                            action["action_type"] = "execute_action"
+
+                    # Fix query that's a dict instead of string
                     if action.get("action_type") == "search_db" and isinstance(action.get("query"), dict):
                         q = action["query"]
                         action["query"] = str(next(iter(q.values()))) if q else ""
-                
+
                 return json.dumps(action)
-            except json.JSONDecodeError as je:
+
+            except json.JSONDecodeError:
                 if attempt < max_retries - 1:
-                    messages.append({"role": "user", "content": "Your response was empty or malformed. Reply with a valid JSON tool call."})
+                    messages.append({
+                        "role": "user",
+                        "content": "Your response was malformed JSON. Reply with a valid JSON tool call only."
+                    })
                     continue
-                # DIAGNOSTIC DUMP
-                print(f"\n[DIAGNOSTIC DUMP] Complete message history for failed turn:\n{json.dumps(messages, indent=2)}", file=sys.stderr)
-                print(f"\n[DEBUG] Raw LLM Output:\n{content}", file=sys.stderr)
-                raise je
+                print(f"[DEBUG] JSON parse failed after {max_retries} attempts. Raw: {content[:200]}", file=sys.stderr)
+                return json.dumps({"action_type": "final_response", "text": "Unable to parse action after retries."})
 
         except Exception as e:
+            last_error = e
             if attempt < max_retries - 1:
-                last_error = e
                 continue
-            default_action = {"action_type": "final_response", "text": f"Unable to process at this time. Error: {str(e or last_error)}"}
-            return json.dumps(default_action)
-    
-    # FINAL DIAGNOSTIC DUMP before giving up
-    print(f"\n[DIAGNOSTIC DUMP] Failure after {max_retries} attempts. Messages:\n{json.dumps(messages, indent=2)}", file=sys.stderr)
+            print(f"[DEBUG] Model request failed: {e}", file=sys.stderr)
+            return json.dumps({"action_type": "final_response", "text": f"Model error: {str(e)}"})
+
     return json.dumps({"action_type": "final_response", "text": "Model failed to respond after multiple attempts."})
 
 
-async def check_connectivity():
-    """Verify that both the LLM and Env server are reachable."""
-    print("Checking connectivity...", file=sys.stderr)
-    
-    # 1. Check Env
-    try:
-        from client import OmniSupportEnv
-        test_env = OmniSupportEnv(base_url=ENV_URL)
-        await test_env.reset(task_id=TASK_NAME)
-        print(f"  [OK] Environment server at {ENV_URL} is reachable.", file=sys.stderr)
-        await test_env.close()
-    except Exception as e:
-        print(f"  [ERROR] Environment server at {ENV_URL} is NOT reachable: {e}", file=sys.stderr)
+# ── Single Task Runner ────────────────────────────────────────────────────────
 
-    # 2. Check LLM
-    try:
-        client.models.list()
-        print(f"  [OK] LLM server at {API_BASE_URL} is reachable.", file=sys.stderr)
-    except Exception as e:
-        print(f"  [ERROR] LLM server at {API_BASE_URL} is NOT reachable: {e}", file=sys.stderr)
+async def run_single_task(task_name: str) -> None:
+    """Run a complete episode for one task and emit [START]...[STEP]...[END]."""
+    env = OmniSupportEnv(base_url=ENV_URL)
 
-
-async def main() -> None:
-    # Use From Docker method if explicitly requested, else hit local env
-    if os.getenv("USE_DOCKER"):
-        import openenv.core
-        env = await OmniSupportEnv.from_docker_image(IMAGE_NAME, env={"OMNISUPPORT_TASK": TASK_NAME})
-    else:
-        # Default to local server (useful for local development/testing)
-        env = OmniSupportEnv(base_url=ENV_URL)
-
-    history = []
-    rewards = []
+    history: List[dict] = []
+    rewards: List[float] = []
     steps_taken = 0
-    score = 0.0
+    score = 0.01  # Default to 0.01 (valid minimum) if episode fails
     success = False
+    last_obs = None
+    last_error_msg = None
 
-    await check_connectivity()
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        result = await env.reset(task_id=TASK_NAME)
-        
-        last_obs = result.observation.model_dump()
-        last_error = None
-        
+        result = await env.reset(task_id=task_name)
+
+        last_obs = result.observation.model_dump() if hasattr(result.observation, "model_dump") else {}
+
         for step in range(1, MAX_STEPS + 1):
             if result.done:
                 break
@@ -272,57 +289,80 @@ async def main() -> None:
             action_json_str = await get_agent_action(result.observation, history)
 
             try:
-                # Use TypeAdapter for standard Pydantic V2 Union validation
                 from pydantic import TypeAdapter
                 adapter = TypeAdapter(OmniSupportEnv.action_type)
                 action_obj = adapter.validate_json(action_json_str)
-                
+
                 result = await env.step(action_obj)
-                
-                obs = result.observation.model_dump()
+
+                obs = result.observation.model_dump() if hasattr(result.observation, "model_dump") else {}
                 reward = result.reward or 0.0
                 done = result.done
-                error = None
+                step_error = None
+
             except Exception as e:
-                obs = last_obs
+                obs = last_obs or {}
                 reward = 0.0
                 done = False
-                error = str(e).replace("\n", " ") # Keep error on single line
+                step_error = str(e).replace("\n", " ").replace("\r", "")
 
             rewards.append(reward)
             steps_taken = step
-            
-            # ── Update History (Only essential results to save tokens) ──
+
+            # Update history (only essential context to save tokens)
             history.append({
                 "action": action_json_str,
-                "tool_result": json.dumps(obs.get("last_tool_output", {})) if isinstance(obs, dict) else str(obs)
+                "tool_result": json.dumps(obs.get("last_tool_output", {})) if isinstance(obs, dict) else str(obs),
             })
 
             last_obs = obs
-            last_error = error
+            last_error_msg = step_error
 
-            # Clean action logs for 1-liner STDOUT constraint
-            clean_action_str = action_json_str.replace("\n", "").replace("\r", "")
-            log_step(step=step, action=clean_action_str, reward=reward, done=done, error=error)
+            log_step(step=step, action=action_json_str, reward=reward, done=done, error=step_error)
 
             if done:
-                # Use the official grader score from the server state
-                score = obs.get("grader_score", 0.0)
+                # Read grader score from final observation
+                raw_score = obs.get("grader_score", 0.0) if isinstance(obs, dict) else 0.0
+                score = clamp_score(raw_score)
                 success = score >= SUCCESS_SCORE_THRESHOLD
                 break
+
+    except Exception as e:
+        print(f"[DEBUG] Episode error for task={task_name}: {e}", file=sys.stderr)
+        score = 0.01
 
     finally:
         try:
             await env.close()
         except Exception as e:
-            print(f"[DEBUG] env.close() error: {e}", flush=True)
-            
-        # final score is the grader score from the last observation
-        if score == 0.0 and last_obs:
-            score = last_obs.get("grader_score", 0.0)
-            success = score >= SUCCESS_SCORE_THRESHOLD
-            
+            print(f"[DEBUG] env.close() error (task={task_name}): {e}", file=sys.stderr)
+
+        # Final score fallback: if episode ended without done=True, check last obs
+        if score <= 0.01 and last_obs and isinstance(last_obs, dict):
+            raw_score = last_obs.get("grader_score", 0.0)
+            if raw_score > 0.0:
+                score = clamp_score(raw_score)
+                success = score >= SUCCESS_SCORE_THRESHOLD
+
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+
+# ── Main Entry Point ────────────────────────────────────────────────────────
+
+async def _run_all_tasks() -> None:
+    """Run all 3 required tasks sequentially."""
+    for task_name in TASK_IDS:
+        await run_single_task(task_name)
+
+
+async def main() -> None:
+    """Entry point with global 19-minute timeout to prevent evaluator DQ."""
+    try:
+        await asyncio.wait_for(_run_all_tasks(), timeout=TIMEOUT_MINUTES * 60)
+    except asyncio.TimeoutError:
+        print(f"[DEBUG] Global timeout reached ({TIMEOUT_MINUTES} min). Emitting fallback END.", file=sys.stderr)
+        # Emit a fallback [END] for the current task if timed out mid-run
+        print(f"[END] success=false steps=0 score=0.01 rewards=0.01", flush=True)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -23,6 +23,12 @@ app.add_middleware(
 )
 
 env = OmniSupportEnvironment()
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all handler so unhandled errors return structured JSON."""
+    return JSONResponse(status_code=500, content={"error": str(exc), "type": type(exc).__name__})
 
 
 class ResetRequest(BaseModel):
