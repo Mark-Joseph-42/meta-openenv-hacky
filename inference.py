@@ -67,6 +67,8 @@ SYSTEM_PROMPT = textwrap.dedent(
     - Never hallucinate tracking IDs.
     - Respond with EXACTLY ONE tool call per turn as JSON.
     - JSON keys must be exactly: "action_type" and one of ["query", "topic", "cmd", "text"].
+    - NEVER return an empty response. If you are finished, you MUST use FinalResponse.
+    - If you are confused, use SearchDB or VerifyPolicy to look for more information.
     
     Example: {"action_type": "search_db", "query": "TRK-9928-XZ"}
     """
@@ -96,62 +98,82 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 async def get_agent_action(obs: OmniSupportObservation, history: List[dict]) -> str:
     """Query the LLM and extract a structured action."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    # Add history for context
+    
+    # history contains pairs of {"action": ..., "observation": ...}
     for entry in history:
-        messages.append({"role": "user", "content": f"Output from last tool: {json.dumps(entry.get('last_tool_output', {}))}"})
+        messages.append({"role": "assistant", "content": entry.get("action", "")})
+        messages.append({"role": "user", "content": f"Observation: {entry.get('observation', '')}"})
     
     # Add current observation
     messages.append({"role": "user", "content": f"Current Observation: {obs.model_dump_json()}"})
 
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=0.1,
-            max_tokens=500,
-            stream=False,
-        )
-        content = (response.choices[0].message.content or "").strip()
-        
-        # ── Extraction Logic ──
-        cleaned_content = content
-        if "```" in cleaned_content:
-            # Multi-block check: take the first JSON-like block
-            blocks = cleaned_content.split("```")
-            for block in blocks:
-                if "{" in block and "}" in block:
-                    cleaned_content = block
-                    if cleaned_content.startswith("json"):
-                        cleaned_content = cleaned_content[4:]
-                    break
-        
-        cleaned_content = cleaned_content.strip()
+    # ── Retry Loop for robustness ──
+    max_retries = 3
+    last_error = None
 
+    for attempt in range(max_retries):
         try:
-            action = json.loads(cleaned_content)
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=500,
+                stream=False,
+            )
+            content = (response.choices[0].message.content or "").strip()
             
-            # ── Normalization (Harding against model quirks) ──
-            if isinstance(action, dict):
-                # 1. Normalize case (FinalResponse -> final_response)
-                if "action_type" in action:
-                    action["action_type"] = action["action_type"].lower()
-                
-                # 2. Extract string from query if model incorrectly sent a dict
-                if action.get("action_type") == "search_db" and isinstance(action.get("query"), dict):
-                    q = action["query"]
-                    # If model sent {"order_id": "5510"} or similar
-                    action["query"] = str(next(iter(q.values()))) if q else ""
-            
-            return json.dumps(action)
-        except json.JSONDecodeError as je:
-            # LOG RAW OUTPUT ON FAILURE (to stderr for visibility in console)
-            print(f"\n[DEBUG] LLM returned non-JSON content. Raw output follows:\n{'-'*40}\n{content}\n{'-'*40}", file=sys.stderr)
-            raise je
+            if not content:
+                # If model is being shy, nudge it
+                messages.append({"role": "user", "content": "Please provide your next action in JSON format. Do not leave the response empty."})
+                continue
 
-    except Exception as e:
-        # Fallback closure if JSON parse or LLM fails
-        default_action = {"action_type": "final_response", "text": f"Unable to process at this time. Error: {str(e)}"}
-        return json.dumps(default_action)
+            # ── Extraction Logic ──
+            cleaned_content = content
+            if "```" in cleaned_content:
+                # Multi-block check: take the first JSON-like block
+                blocks = cleaned_content.split("```")
+                for block in blocks:
+                    if "{" in block and "}" in block:
+                        cleaned_content = block
+                        if cleaned_content.startswith("json"):
+                            cleaned_content = cleaned_content[4:]
+                        break
+            
+            cleaned_content = cleaned_content.strip()
+
+            try:
+                action = json.loads(cleaned_content)
+                
+                # ── Normalization (Harding against model quirks) ──
+                if isinstance(action, dict):
+                    # 1. Normalize case (FinalResponse -> final_response)
+                    if "action_type" in action:
+                        action["action_type"] = action["action_type"].lower()
+                    
+                    # 2. Extract string from query if model incorrectly sent a dict
+                    if action.get("action_type") == "search_db" and isinstance(action.get("query"), dict):
+                        q = action["query"]
+                        # If model sent {"order_id": "5510"} or similar
+                        action["query"] = str(next(iter(q.values()))) if q else ""
+                
+                return json.dumps(action)
+            except json.JSONDecodeError as je:
+                if attempt < max_retries - 1:
+                    messages.append({"role": "user", "content": f"Your last response was not valid JSON. Error: {str(je)}. Please provide JSON only."})
+                    continue
+                # LOG RAW OUTPUT ON FAILURE (to stderr for visibility in console)
+                print(f"\n[DEBUG] LLM returned non-JSON content. Raw output follows:\n{'-'*40}\n{content}\n{'-'*40}", file=sys.stderr)
+                raise je
+
+        except Exception as e:
+            if attempt < max_retries - 1:
+                last_error = e
+                continue
+            # Fallback closure if JSON parse or LLM fails
+            default_action = {"action_type": "final_response", "text": f"Unable to process at this time. Error: {str(e or last_error)}"}
+            return json.dumps(default_action)
+    
+    return json.dumps({"action_type": "final_response", "text": "Model failed to respond after multiple attempts."})
 
 
 async def check_connectivity():
@@ -232,6 +254,13 @@ async def main() -> None:
 
             rewards.append(reward)
             steps_taken = step
+            
+            # ── Update History ──
+            history.append({
+                "action": action_json_str,
+                "observation": obs if isinstance(obs, str) else json.dumps(obs)
+            })
+
             last_obs = obs
             last_error = error
 
