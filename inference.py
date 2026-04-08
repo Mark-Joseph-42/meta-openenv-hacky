@@ -40,7 +40,7 @@ IMAGE_NAME = os.getenv("IMAGE_NAME") or "omnisupport-sim:latest"
 API_KEY = os.getenv("HF_TOKEN") or "dummy-key"
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000") # used if not using docker
 BENCHMARK = os.getenv("OMNISUPPORT_BENCHMARK", "omnisupport_sim")
-TASK_NAME = os.getenv("OMNISUPPORT_TASK", "order_check")
+TASK_NAME = os.getenv("OMNISUPPORT_TASK", "fraud_mitigation")
 
 TIMEOUT_MINUTES = 19  # Must complete under 20 min
 MAX_STEPS = 15
@@ -50,26 +50,21 @@ client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
 SYSTEM_PROMPT = textwrap.dedent(
     """
-    You are a Tier-2 Support Specialist AI agent for Team NerK. You solve customer support tickets by using tools.
+    You are a Tier-2 Support AI. You solve tickets using JSON tool calls.
     
-    VERIFY-THEN-ACT PROTOCOL:
-    1. ALWAYS call VerifyPolicy BEFORE issuing any refund or changing shipping.
-    2. For return-related tickets: You MUST verify carrier delivery status via SearchDB with the tracking_id.
-    3. Ensure you have ALL required information (order_id, eligibility, delivery status) before calling ExecuteAction.
+    TOOLS:
+    1. search_db: query (string) - Search orders or tracking IDs.
+    2. verify_policy: topic (string) - Topics: refund_eligibility, return_verification.
+    3. execute_action: cmd ("issue_refund"), params (dict with order_id).
+    4. final_response: text (string) - Professional summary to customer.
     
-    Available tools:
-    1. SearchDB(query): Search the order/customer database. IMPORTANT: 'query' must be a STRING. If you find a 'tracking_id' (e.g. TRK-...), you MUST perform a separate search for that ID before acting.
-    2. VerifyPolicy(topic): Check company policy rules. Topics: refund_eligibility, escalation_protocol, return_verification, shipping_change.
-    3. ExecuteAction(cmd, params): Execute an action. Commands: issue_refund. 'params' is a dictionary containing 'order_id'.
-    4. FinalResponse(text): Close the ticket with a response to the customer.
+    STRICT SOP:
+    1. Search Order ID.
+    2. If a tracking_id is found, you MUST search that tracking_id to check Carrier status.
+    3. Check policies: use 'refund_eligibility' for new refunds, or 'return_verification' if the customer claims they already returned the item.
+    4. Provide a CONCISE and professional FinalResponse when done.
     
-    CRITICAL RULES:
-    1. VERIFY THEN ACTION: You must search the Order AND the Tracking ID before issuing a refund.
-    2. POLICY FIRST: Always check 'refund_eligibility' policy before calling ExecuteAction.
-    3. JSON ONLY: Respond with EXACTLY ONE tool call per turn as JSON.
-    4. KEYS: JSON keys must be exactly: "action_type" and one of ["query", "topic", "cmd", "text"].
-    
-    Example: {"action_type": "search_db", "query": "TRK-9928-XZ"}
+    Example: {"action_type": "search_db", "query": "4829"}
     """
 ).strip()
 
@@ -98,24 +93,22 @@ async def get_agent_action(obs: OmniSupportObservation, history: List[dict]) -> 
     """Query the LLM and extract a structured action."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    # Context Slimming: Show condensed history
-    for i, entry in enumerate(history):
-        action_data = json.loads(entry.get("action", "{}"))
-        observation_val = entry.get("observation", "")
-        
-        # Summarize observation to save tokens
-        if len(observation_val) > 200:
-            observation_val = observation_val[:200] + "..."
-            
-        messages.append({"role": "assistant", "content": json.dumps(action_data)})
-        messages.append({"role": "user", "content": f"Tool Result: {observation_val}"})
+    # history contains pairs of {"action": ..., "tool_result": ...}
+    for entry in history:
+        messages.append({"role": "assistant", "content": entry.get("action", "")})
+        messages.append({"role": "user", "content": f"Tool Result: {entry.get('tool_result', '')}"})
     
-    # Add a progress nudge if history is long
+    # Add a progress nudge
     if len(history) > 0:
-        messages.append({"role": "user", "content": f"Progress: You have completed {len(history)} steps. Please move to the next SOP step or provide a final_response."})
+        messages.append({"role": "user", "content": f"You are in the middle of a ticket. Analyze the results above and proceed with the SOP."})
 
-    # Add current observation
-    messages.append({"role": "user", "content": f"Current Observation: {obs.model_dump_json()}"})
+    # Add current observation (SLIMMED for local LLM performance)
+    slim_obs = {
+        "ticket_id": obs.ticket_id,
+        "internal_notes": obs.internal_notes,
+        "last_tool_output": obs.last_tool_output
+    }
+    messages.append({"role": "user", "content": f"Current Observation: {json.dumps(slim_obs)}"})
 
     # ── Retry Loop for robustness ──
     max_retries = 3
@@ -127,7 +120,7 @@ async def get_agent_action(obs: OmniSupportObservation, history: List[dict]) -> 
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=600, # Increased tokens
+                max_tokens=1024, # Increased for final response room
                 stream=False,
             )
             content = (response.choices[0].message.content or "").strip()
@@ -137,8 +130,15 @@ async def get_agent_action(obs: OmniSupportObservation, history: List[dict]) -> 
                 messages.append({"role": "user", "content": "CONTINUE. Provide your next action in JSON format based on the tools above."})
                 continue
 
-            # ── Extraction Logic ──
+            # ── Extraction & Repair Logic ──
             cleaned_content = content
+            
+            # Simple Auto-Repair for truncated JSON
+            if cleaned_content.count('"') % 2 != 0:
+                cleaned_content += '"'
+            if cleaned_content.count('{') > cleaned_content.count('}'):
+                cleaned_content += '}'
+            
             if "```" in cleaned_content:
                 blocks = cleaned_content.split("```")
                 for block in blocks:
@@ -262,10 +262,10 @@ async def main() -> None:
             rewards.append(reward)
             steps_taken = step
             
-            # ── Update History ──
+            # ── Update History (Only essential results to save tokens) ──
             history.append({
                 "action": action_json_str,
-                "observation": obs if isinstance(obs, str) else json.dumps(obs)
+                "tool_result": json.dumps(obs.get("last_tool_output", {})) if isinstance(obs, dict) else str(obs)
             })
 
             last_obs = obs
