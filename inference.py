@@ -438,13 +438,18 @@ async def run_single_task(task_name: str) -> None:
                 score = clamp_score(raw_score)
                 success = score >= SUCCESS_SCORE_THRESHOLD
 
+        # CRITICAL: rewards list must never be empty — empty list produces
+        # malformed [END] line (rewards=) that the evaluator cannot parse.
+        if not rewards:
+            rewards = [0.01]
+
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 # ── Main Entry Point ────────────────────────────────────────────────────────
 
 async def _run_all_tasks() -> None:
-    """Run all 3 required tasks sequentially."""
+    """Run all 5 required tasks sequentially."""
     for task_name in TASK_IDS:
         await run_single_task(task_name)
 
