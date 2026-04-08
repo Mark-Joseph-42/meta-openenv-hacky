@@ -1,6 +1,8 @@
 """
 OmniSupport-Sim Environment — Core implementation.
 Implements the OpenEnv spec: reset(), step(), state()
+
+Upgraded: uses ScenarioGenerator for fully dynamic, seed-reproducible episodes.
 """
 import uuid
 import random
@@ -8,45 +10,31 @@ from typing import Optional
 
 from omnisupport_sim.models import (
     OmniSupportObservation,
-    OmniSupportAction,
     OmniSupportState,
-    SearchDB,
-    VerifyPolicy,
-    ExecuteAction,
-    FinalResponse,
 )
 from server.mock_db import MockDB
 from server.policy_kb import lookup_policy
 from server.carrier_api import query_carrier
 from server.reward import RewardCalculator
 from server.graders import grade
+from server.scenario_generator import ScenarioGenerator
 
-
-# ── Task Scenario Definitions ──────────────────────────────────────────────
-TASK_SCENARIOS = {
-    "order_check": {
-        "ticket_id": "TK-1001",
-        "ticket_text": "Hi, I have multiple orders and I need to know the current status of my most recent one. My customer ID is cust_882.",
-        "customer_id": "cust_882",
-        "description": "Status Resolution — retrieve correct order status from multiple active orders."
-    },
-    "refund_logic": {
-        "ticket_id": "TK-1002",
-        "ticket_text": "I received my Wireless Headphones (order #4829) and they're damaged. I want a full refund immediately. My customer ID is cust_882.",
-        "customer_id": "cust_882",
-        "description": "SOP Compliance — verify refund policy before processing. Item: Wireless Headphones, $89.99."
-    },
-    "fraud_mitigation": {
-        "ticket_id": "TK-1003",
-        "ticket_text": "I already returned my Wireless Headphones (order #4829) days ago but I still haven't received my refund. The tracking shows it was delivered back to you. Please process my refund now. Customer ID: cust_882.",
-        "customer_id": "cust_882",
-        "description": "Conflict Reconciliation — customer claims return, DB shows 'Pending Return'. Must verify via CarrierAPI before refunding."
-    },
-}
+SUPPORTED_TASKS = [
+    "order_check",
+    "refund_logic",
+    "fraud_mitigation",
+    "fraud_prevention",
+    "escalation_required",
+]
 
 
 class OmniSupportEnvironment:
-    """OpenEnv-compliant environment for Tier-2 Support Simulation."""
+    """OpenEnv-compliant environment for Tier-2 Support Simulation.
+
+    Each reset() call generates a fresh, seed-reproducible scenario via
+    ScenarioGenerator, covering 5 distinct task types with randomized
+    customers, order values, dates, fraud flags, and carrier data.
+    """
 
     def __init__(self):
         self.db = MockDB()
@@ -54,28 +42,37 @@ class OmniSupportEnvironment:
         self._state: Optional[OmniSupportState] = None
         self._current_scenario: Optional[dict] = None
 
-    def reset(self, task_id: str = "order_check") -> dict:
-        """Initialize a new episode.
+    def reset(self, task_id: str = "order_check", seed: Optional[int] = None) -> dict:
+        """Initialize a new episode with a dynamically generated scenario.
 
         Args:
-            task_id: One of 'order_check', 'refund_logic', 'fraud_mitigation'
+            task_id: One of the 5 supported task IDs, or 'random'
+            seed: Optional int for reproducible scenario generation
 
         Returns:
-            StepResult-like dict with observation, reward, done
+            Initial observation dict
         """
         self.db.reset()
         self.reward_calc.reset()
 
+        # ── Resolve task_id ──
         if task_id == "random":
-            scenario = self._generate_random_scenario()
-        else:
-            scenario = TASK_SCENARIOS.get(task_id)
+            task_id = random.choice(SUPPORTED_TASKS)
 
-        if scenario is None:
-            raise ValueError(f"Unknown task_id: {task_id}")
+        if task_id not in SUPPORTED_TASKS:
+            raise ValueError(f"Unknown task_id: '{task_id}'. Valid: {SUPPORTED_TASKS}")
 
+        # ── Generate dynamic scenario ──
+        episode_seed = seed if seed is not None else random.randint(0, 2**31)
+        scenario = ScenarioGenerator.generate(task_id, seed=episode_seed)
+
+        # ── Populate MockDB from scenario ──
+        self.db.load_scenario(scenario)
         self._current_scenario = scenario
-        customer_history = self.db.get_customer_history(scenario["customer_id"])
+        self._current_scenario["_seed"] = episode_seed
+
+        customer_id      = scenario["customer"]["id"]
+        customer_history = self.db.get_customer_history(customer_id)
 
         self._state = OmniSupportState(
             episode_id=str(uuid.uuid4()),
@@ -98,9 +95,13 @@ class OmniSupportEnvironment:
 
         return {
             "observation": observation.model_dump(),
-            "reward": 0.0,
-            "done": False,
-            "info": {"task_id": task_id, "description": scenario["description"]},
+            "reward":      0.0,
+            "done":        False,
+            "info": {
+                "task_id":     task_id,
+                "description": scenario["description"],
+                "seed":        episode_seed,
+            },
         }
 
     def step(self, action: dict) -> dict:
@@ -110,44 +111,53 @@ class OmniSupportEnvironment:
             action: Dict with action_type and relevant fields
 
         Returns:
-            StepResult-like dict with observation, reward, done
+            Observation, reward, done, info dict
         """
         if self._state is None:
             raise RuntimeError("Must call reset() before step()")
         if self._state.done:
-            # Idempotency: If final_response is called on a done episode, just return the final state again
             if action.get("action_type") == "final_response":
-                observation = OmniSupportObservation(
+                # Idempotent: already closed
+                customer_id = self._current_scenario["customer"]["id"]
+                obs = OmniSupportObservation(
                     ticket_id=self._current_scenario["ticket_id"],
-                    customer_history=self.db.get_customer_history(self._current_scenario["customer_id"]),
+                    customer_history=self.db.get_customer_history(customer_id),
                     internal_notes="Ticket already resolved.",
                     last_tool_output={"response_sent": True, "already_done": True},
                 )
                 return {
-                    "observation": observation.model_dump(),
+                    "observation": obs.model_dump(),
                     "reward": 0.0,
                     "done": True,
                     "info": {"status": "already_done"},
                 }
             raise RuntimeError("Episode is done. Call reset() to start a new one.")
 
-        action_type = action.get("action_type")
-        tool_output = None
+        action_type    = action.get("action_type")
+        tool_output    = None
         internal_notes = ""
-        done = False
+        done           = False
 
-        # ── Route action ──
+        # ── Route action ──────────────────────────────────────────────────────
         if action_type == "search_db":
             query = action.get("query", "")
-            tool_output = self.db.search_orders(query)
-            # Check if this is actually a carrier query
-            if any(tid in query.upper() for tid in ["TRK-"]):
-                carrier_result = query_carrier(query.strip())
-                tool_output = carrier_result
+            # If query looks like a tracking ID → route to CarrierAPI (hidden state design)
+            if "TRK-" in query.upper():
+                tool_output = query_carrier(query.strip(), self._current_scenario.get("carrier_data", {}))
                 self.reward_calc.carrier_queried = True
-            if isinstance(tool_output, list):
-                tool_output = {"results": tool_output, "count": len(tool_output)}
-            internal_notes = f"SearchDB('{query}') returned {len(tool_output) if isinstance(tool_output, dict) else 0} fields"
+                internal_notes = f"CarrierAPI('{query}') — shipment data retrieved"
+            else:
+                result = self.db.search_orders(query)
+                tool_output = {"results": result, "count": len(result)} if isinstance(result, list) else result
+                # Auto-detect if result contains a tracking_id the agent should follow up on
+                if isinstance(result, list) and result:
+                    trks = [o.get("tracking_id") for o in result if o.get("tracking_id")]
+                    if trks:
+                        internal_notes = f"SearchDB('{query}') — {len(result)} orders found. Tracking IDs available: {', '.join(trks)}"
+                    else:
+                        internal_notes = f"SearchDB('{query}') — {len(result)} results found"
+                else:
+                    internal_notes = f"SearchDB('{query}') — no results found"
 
         elif action_type == "verify_policy":
             topic = action.get("topic", "")
@@ -157,7 +167,7 @@ class OmniSupportEnvironment:
             internal_notes = f"VerifyPolicy('{topic}') — policy retrieved"
 
         elif action_type == "execute_action":
-            cmd = action.get("cmd", "")
+            cmd    = action.get("cmd", "")
             params = action.get("params", {})
             if cmd == "issue_refund":
                 order_id = params.get("order_id")
@@ -165,53 +175,50 @@ class OmniSupportEnvironment:
                     tool_output = self.db.update_refund_status(int(order_id), "SUCCESS")
                 else:
                     tool_output = {"error": "Missing order_id parameter"}
-                internal_notes = f"ExecuteAction('{cmd}') — refund processed"
-            elif cmd == "change_shipping":
-                tool_output = {"success": True, "message": "Shipping address updated"}
-                internal_notes = f"ExecuteAction('{cmd}') — shipping updated"
+                internal_notes = f"ExecuteAction('{cmd}') — processed"
             else:
-                tool_output = {"error": f"Unknown command: {cmd}"}
+                tool_output    = {"error": f"Unknown command: {cmd}"}
                 internal_notes = f"ExecuteAction('{cmd}') — unknown command"
 
         elif action_type == "final_response":
-            text = action.get("text", "")
-            tool_output = {"response_sent": True, "text": text}
-            internal_notes = f"FinalResponse sent to customer"
-            done = True
+            text           = action.get("text", "")
+            tool_output    = {"response_sent": True, "text": text}
+            internal_notes = "FinalResponse sent to customer"
+            done           = True
 
         else:
-            tool_output = {"error": f"Unknown action_type: {action_type}"}
+            tool_output    = {"error": f"Unknown action_type: {action_type}"}
             internal_notes = f"Unknown action_type: {action_type}"
 
-        # ── Record action ──
+        # ── Record action ──────────────────────────────────────────────────────
         self._state.actions_taken.append(action)
         self._state.tools_called.append(action_type)
         self._state.step_count += 1
 
-        # ── Compute reward ──
+        # ── Compute reward ─────────────────────────────────────────────────────
         step_reward = self.reward_calc.compute_step_reward(
             action,
-            tool_output if isinstance(tool_output, dict) else {"results": tool_output}
+            tool_output if isinstance(tool_output, dict) else {"results": tool_output},
         )
 
-        # ── Terminal reward if done ──
+        # ── Terminal reward ────────────────────────────────────────────────────
         if done:
             self._state.db_snapshot = self.db.get_snapshot()
-            grader_score = grade(self._state.model_dump(), self._state.current_task_id)
+            # Inject scenario context for dynamic graders
+            state_dict = self._state.model_dump()
+            state_dict["scenario_context"] = self._current_scenario
+            grader_score = grade(state_dict, self._state.current_task_id)
             self._state.grader_score = grader_score
             terminal_reward = self.reward_calc.compute_terminal_reward(grader_score)
-            
-            # ── IRON-CLAD ISOLATION ──
-            # On the final step, we replace the step_reward with the terminal_reward
-            # to prevent 'Summation Overflow' (e.g. 0.7 + 0.99 = 1.69)
-            step_reward = terminal_reward
+            step_reward = terminal_reward   # Replace step reward with terminal reward
 
         self._state.reward_accumulated += step_reward
         self._state.done = done
         self._state.db_snapshot = self.db.get_snapshot()
 
-        # Build observation
-        customer_history = self.db.get_customer_history(self._current_scenario["customer_id"])
+        # ── Build observation ──────────────────────────────────────────────────
+        customer_id      = self._current_scenario["customer"]["id"]
+        customer_history = self.db.get_customer_history(customer_id)
         observation = OmniSupportObservation(
             ticket_id=self._current_scenario["ticket_id"],
             customer_history=customer_history,
@@ -222,53 +229,14 @@ class OmniSupportEnvironment:
 
         return {
             "observation": observation.model_dump(),
-            "reward": step_reward,
-            "done": done,
+            "reward":      step_reward,
+            "done":        done,
             "info": {
-                "step_count": self._state.step_count,
+                "step_count":   self._state.step_count,
                 "total_reward": self._state.reward_accumulated,
                 "grader_score": self._state.grader_score,
                 "sop_violations": self.reward_calc.sop_violations,
             },
-        }
-
-    def _generate_random_scenario(self) -> dict:
-        """Procedurally generate a unique support scenario."""
-        # 1. Pick a random customer from the DB
-        customer_ids = list(self.db.customers.keys())
-        cid = random.choice(customer_ids)
-        customer = self.db.customers[cid]
-        
-        # 2. Pick one of their orders
-        cust_history = self.db.get_customer_history(cid)
-        orders = cust_history.get("orders", [])
-        if not orders:
-            # Fallback if customer has no orders
-            return TASK_SCENARIOS["order_check"]
-        
-        target_order = random.choice(orders)
-        order_id = target_order["order_id"]
-        item = target_order["item"]
-        
-        # 3. Choose a random 'Type' of problem
-        issue_types = ["refund_request", "tracking_check", "status_inquiry"]
-        issue = random.choice(issue_types)
-        
-        if issue == "refund_request":
-            text = f"I want a refund for my {item} (order #{order_id}). It's not what I expected. Customer ID: {cid}"
-            desc = f"Dynamic Refund Request - {item}"
-        elif issue == "tracking_check":
-            text = f"Where is my {item} (order #{order_id})?? I returned it but no money yet. Customer ID: {cid}"
-            desc = f"Dynamic Conflict - {item}"
-        else:
-            text = f"What is the status of order #{order_id} ({item})? Customer ID: {cid}"
-            desc = f"Dynamic Status Check - {item}"
-            
-        return {
-            "ticket_id": f"TK-RAND-{random.randint(1000, 9999)}",
-            "ticket_text": text,
-            "customer_id": cid,
-            "description": desc
         }
 
     def state(self) -> dict:
@@ -276,4 +244,6 @@ class OmniSupportEnvironment:
         if self._state is None:
             return {"error": "No active episode. Call reset() first."}
         self._state.db_snapshot = self.db.get_snapshot()
-        return self._state.model_dump()
+        s = self._state.model_dump()
+        s["scenario_context"] = self._current_scenario
+        return s

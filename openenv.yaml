@@ -7,6 +7,8 @@ task_ids:
   - order_check
   - refund_logic
   - fraud_mitigation
+  - fraud_prevention
+  - escalation_required
 runtime:
   port: 8000
   resources:

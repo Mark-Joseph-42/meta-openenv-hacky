@@ -63,8 +63,8 @@ args, unknown = parser.parse_known_args()
 ENV_URL = args.url_arg or os.getenv("ENV_URL", "http://localhost:8000")
 BENCHMARK = os.getenv("OMNISUPPORT_BENCHMARK", "omnisupport_sim")
 
-# ── ALL 3 Tasks — required by evaluator ──
-TASK_IDS = ["order_check", "refund_logic", "fraud_mitigation"]
+# ── ALL 5 Tasks — required by evaluator ──
+TASK_IDS = ["order_check", "refund_logic", "fraud_mitigation", "fraud_prevention", "escalation_required"]
 
 TIMEOUT_MINUTES = 19  # Hard limit: evaluator kills after 20 min
 MAX_STEPS = 15
@@ -139,10 +139,52 @@ _PROMPT_FRAUD_MITIGATION = _PROMPT_BASE + textwrap.dedent("""
     {"action_type": "verify_policy", "topic": "return_verification"}
 """).strip()
 
+_PROMPT_FRAUD_PREVENTION = _PROMPT_BASE + textwrap.dedent("""
+
+    YOUR TASK: FRAUD PREVENTION — detect a FRAUD_FLAG and DENY the refund request.
+
+    MANDATORY STEPS (in order):
+    1. search_db with the order ID or customer ID from the ticket.
+    2. READ the order notes carefully. Look for 'FRAUD_FLAG'.
+    3. verify_policy with topic "refund_eligibility" (REQUIRED even for denials).
+    4. final_response: DENY the refund professionally citing the flag.
+
+    CRITICAL RULES:
+    - If the order notes contain 'FRAUD_FLAG', you MUST NOT issue a refund under ANY circumstances.
+    - Do NOT call execute_action issue_refund if FRAUD_FLAG is present.
+    - Your final_response must include language like "unable to process", "flagged", or "denied".
+
+    EXAMPLE DENIAL RESPONSE:
+    "I've reviewed your account and unfortunately we're unable to process this refund at this time
+    due to a security flag on your account. Please contact our fraud review team for assistance."
+""").strip()
+
+_PROMPT_ESCALATION = _PROMPT_BASE + textwrap.dedent("""
+
+    YOUR TASK: ESCALATION REQUIRED — order value exceeds $500 auto-refund limit.
+
+    MANDATORY STEPS (in order):
+    1. search_db with the order ID or customer ID from the ticket.
+    2. Check the item value. If it is over $500, you CANNOT auto-refund.
+    3. verify_policy with topic "refund_eligibility" (REQUIRED).
+    4. final_response: Tell the customer this requires manual escalation. DO NOT issue a refund.
+
+    CRITICAL RULES:
+    - Items valued over $500 CANNOT be auto-refunded. Period.
+    - Do NOT call execute_action issue_refund for high-value items.
+    - Your response MUST mention: escalation, supervisor, specialist, or manual review.
+
+    EXAMPLE RESPONSE:
+    "Your order (#XXXX) for [item] at $[value] exceeds our automated refund threshold of $500.
+    I am escalating this to our specialist team who will contact you within 24 hours."
+""").strip()
+
 TASK_PROMPTS = {
-    "order_check":       _PROMPT_ORDER_CHECK,
-    "refund_logic":      _PROMPT_REFUND_LOGIC,
-    "fraud_mitigation":  _PROMPT_FRAUD_MITIGATION,
+    "order_check":         _PROMPT_ORDER_CHECK,
+    "refund_logic":        _PROMPT_REFUND_LOGIC,
+    "fraud_mitigation":    _PROMPT_FRAUD_MITIGATION,
+    "fraud_prevention":    _PROMPT_FRAUD_PREVENTION,
+    "escalation_required": _PROMPT_ESCALATION,
 }
 
 # Fallback for unknown tasks
