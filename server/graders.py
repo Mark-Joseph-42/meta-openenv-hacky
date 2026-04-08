@@ -215,7 +215,7 @@ GRADERS = {
 }
 
 def grade(state: dict, task_id: str) -> float:
-    \"\"\"Route to the correct grader and map score into strictly (0, 1) range.\"\"\"
+    """Route to the correct grader and map score into strictly (0, 1) range."""
     grader = GRADERS.get(task_id)
     if grader is None:
         raise ValueError(f"Unknown task_id: {task_id}")
