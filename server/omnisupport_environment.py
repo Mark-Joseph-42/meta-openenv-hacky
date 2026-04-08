@@ -3,6 +3,7 @@ OmniSupport-Sim Environment — Core implementation.
 Implements the OpenEnv spec: reset(), step(), state()
 """
 import uuid
+import random
 from typing import Optional
 
 from omnisupport_sim.models import (
@@ -65,7 +66,11 @@ class OmniSupportEnvironment:
         self.db.reset()
         self.reward_calc.reset()
 
-        scenario = TASK_SCENARIOS.get(task_id)
+        if task_id == "random":
+            scenario = self._generate_random_scenario()
+        else:
+            scenario = TASK_SCENARIOS.get(task_id)
+
         if scenario is None:
             raise ValueError(f"Unknown task_id: {task_id}")
 
@@ -221,6 +226,45 @@ class OmniSupportEnvironment:
                 "grader_score": self._state.grader_score,
                 "sop_violations": self.reward_calc.sop_violations,
             },
+        }
+
+    def _generate_random_scenario(self) -> dict:
+        """Procedurally generate a unique support scenario."""
+        # 1. Pick a random customer from the DB
+        customer_ids = list(self.db.customers.keys())
+        cid = random.choice(customer_ids)
+        customer = self.db.customers[cid]
+        
+        # 2. Pick one of their orders
+        cust_history = self.db.get_customer_history(cid)
+        orders = cust_history.get("orders", [])
+        if not orders:
+            # Fallback if customer has no orders
+            return TASK_SCENARIOS["order_check"]
+        
+        target_order = random.choice(orders)
+        order_id = target_order["order_id"]
+        item = target_order["item"]
+        
+        # 3. Choose a random 'Type' of problem
+        issue_types = ["refund_request", "tracking_check", "status_inquiry"]
+        issue = random.choice(issue_types)
+        
+        if issue == "refund_request":
+            text = f"I want a refund for my {item} (order #{order_id}). It's not what I expected. Customer ID: {cid}"
+            desc = f"Dynamic Refund Request - {item}"
+        elif issue == "tracking_check":
+            text = f"Where is my {item} (order #{order_id})?? I returned it but no money yet. Customer ID: {cid}"
+            desc = f"Dynamic Conflict - {item}"
+        else:
+            text = f"What is the status of order #{order_id} ({item})? Customer ID: {cid}"
+            desc = f"Dynamic Status Check - {item}"
+            
+        return {
+            "ticket_id": f"TK-RAND-{random.randint(1000, 9999)}",
+            "ticket_text": text,
+            "customer_id": cid,
+            "description": desc
         }
 
     def state(self) -> dict:

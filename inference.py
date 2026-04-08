@@ -38,9 +38,15 @@ API_BASE_URL = os.getenv("API_BASE_URL") or "http://localhost:1234/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "qwen3.5-4b-python-coder"
 IMAGE_NAME = os.getenv("IMAGE_NAME") or "omnisupport-sim:latest"
 API_KEY = os.getenv("HF_TOKEN") or "dummy-key"
-ENV_URL = os.getenv("ENV_URL", "http://localhost:8000") # used if not using docker
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("url_arg", nargs="?", default=None)
+parser.add_argument("--task", default=os.getenv("OMNISUPPORT_TASK", "fraud_mitigation"))
+args, unknown = parser.parse_known_args()
+
+ENV_URL = args.url_arg or os.getenv("ENV_URL", "http://localhost:8000")
+TASK_NAME = args.task
 BENCHMARK = os.getenv("OMNISUPPORT_BENCHMARK", "omnisupport_sim")
-TASK_NAME = os.getenv("OMNISUPPORT_TASK", "fraud_mitigation")
 
 TIMEOUT_MINUTES = 19  # Must complete under 20 min
 MAX_STEPS = 15
@@ -209,12 +215,6 @@ async def check_connectivity():
 
 
 async def main() -> None:
-    global ENV_URL
-    # Allow command line argument for ENV_URL
-    if len(sys.argv) > 1 and sys.argv[1].startswith("http"):
-        ENV_URL = sys.argv[1]
-        print(f"Using ENV_URL from argument: {ENV_URL}", file=sys.stderr)
-
     # Use From Docker method if explicitly requested, else hit local env
     if os.getenv("USE_DOCKER"):
         import openenv.core
