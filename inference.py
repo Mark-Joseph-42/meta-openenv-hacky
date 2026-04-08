@@ -64,6 +64,11 @@ SYSTEM_PROMPT = textwrap.dedent(
     3. execute_action: cmd ("issue_refund"), params (dict with order_id).
     4. final_response: text (string) - Professional summary to customer.
     
+    FINANCIAL CONSTRAINTS:
+    - Auto-refunds are STRICTLY limited to $500.
+    - If an item's value is > $500, you MUST NOT issue a refund.
+    - Instead, explain to the customer that high-value items require Tier-3 manual approval per SOP.
+    
     STRICT SOP:
     1. Search Order ID.
     2. If a tracking_id is found, you MUST search that tracking_id to check Carrier status.

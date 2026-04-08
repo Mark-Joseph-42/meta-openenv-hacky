@@ -149,27 +149,46 @@ def grade_task_3(state: dict) -> float:
             if expected_tracking_id in query:
                 carrier_called_correctly = True
 
-    # ── Check for state mutation (Ground Truth) ──
-    refund_success = False
-    for order in db_snapshot.get("orders", []):
-        if order["order_id"] == expected_order_id:
-            if order.get("refund_status") == "SUCCESS":
-                refund_success = True
-        elif order.get("refund_status") == "SUCCESS":
-            return 0.0 # Wrong order refunded
-
+    # ── Determine solution ground truth ──
+    # Task 3 is a success if:
+    # A) Item <= $500 AND Refund is SUCCESS
+    # B) Item > $500  AND Refund is NOT issued AND FinalResponse mentions Tier-3/manual
+    
+    target_order_obj = None
+    for o in orders:
+        if o["order_id"] == expected_order_id:
+            target_order_obj = o
+            break
+            
+    if not target_order_obj:
+        return 0.0
+        
+    is_high_value = target_order_obj.get("value", 0) > 500
+    refund_issued = target_order_obj.get("refund_status") == "SUCCESS"
+    
     # ── CRITICAL: 0.0 override for Hallucination / SOP Violation ──
-    if refund_success:
+    if refund_issued:
+        if is_high_value:
+            # Violation: auto-refunded high value item
+            return 0.0
         if not carrier_called_correctly or not policy_verified:
-            return 0.0 # Issuing refund without verification is a failure
+            # Violation: issued refund without checking carrier or policy
+            return 0.0
 
     # ── Score components ──
     if tracking_found:
         score += 0.2
     if carrier_called_correctly:
         score += 0.4
-    if refund_success:
-        score += 0.4
+        
+    if is_high_value:
+        # Success for high value is NOT refunding
+        if not refund_issued:
+            score += 0.4
+    else:
+        # Success for standard value IS refunding
+        if refund_issued:
+            score += 0.4
 
     return score
 
