@@ -9,7 +9,7 @@ from inference import log_start, log_step, log_end, clamp_score, clamp_reward
 
 lines = []
 with redirect_stdout(io.StringIO()) as f:
-    log_start('order_check', 'omnisupport_sim', 'Qwen/Qwen2.5-72B-Instruct')
+    log_start('order_check', 'omnisupport_sim', 'gpt-4o-mini')
     log_step(1, '{"action_type":"search_db","query":"cust_882"}', 0.0, False, None)
     log_step(2, '{"action_type":"final_response","text":"Delivered."}', 1.0, True, None)
     log_end(True, 2, 0.99, [0.0, 1.0])

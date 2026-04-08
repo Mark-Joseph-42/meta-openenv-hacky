@@ -12,7 +12,7 @@ from openai import OpenAI
 
 # ── Configuration ──
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:1234/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen3.5-4b-python-coder")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 ENV_URL = os.getenv("ENV_URL", "https://markjoseph2003-metahacky.hf.space")
 TIMEOUT_MINUTES = 19  # Must complete under 20 min
 

@@ -292,8 +292,8 @@ Noise entries (TRK-0000-XX, TRK-9999-ZZ) are always present in the carrier syste
 ### Environment Variables
 
 ```bash
-API_BASE_URL=https://router.huggingface.co/v1
-MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
+API_BASE_URL=https://api.openai.com/v1
+MODEL_NAME=gpt-4o-mini
 HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx
 ```
 
@@ -333,11 +333,11 @@ python stress_test.py
 ## STDOUT Format (OpenEnv Compliant)
 
 ```
-[START] task=order_check env=omnisupport_sim model=Qwen/Qwen2.5-72B-Instruct
+[START] task=order_check env=omnisupport_sim model=gpt-4o-mini
 [STEP]  step=1 action={"action_type":"search_db","query":"cust_001"} reward=0.99 done=false error=null
 [STEP]  step=2 action={"action_type":"final_response","text":"Your most recent order..."} reward=0.99 done=true error=null
 [END]   success=true steps=2 score=0.99 rewards=0.99,0.99
-[START] task=refund_logic env=omnisupport_sim model=Qwen/Qwen2.5-72B-Instruct
+[START] task=refund_logic env=omnisupport_sim model=gpt-4o-mini
 ...
 [END]   success=true steps=4 score=0.99 rewards=0.99,0.95,0.79,0.99
 ```

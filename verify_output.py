@@ -2,13 +2,13 @@
 import re
 
 output = (
-    "[START] task=order_check env=omnisupport_sim model=Qwen/Qwen2.5-72B-Instruct\n"
+    "[START] task=order_check env=omnisupport_sim model=gpt-4o-mini\n"
     "[STEP] step=1 action={\"action_type\": \"final_response\", \"text\": \"Model error.\"} reward=0.01 done=true error=null\n"
     "[END] success=false steps=1 score=0.01 rewards=0.01\n"
-    "[START] task=refund_logic env=omnisupport_sim model=Qwen/Qwen2.5-72B-Instruct\n"
+    "[START] task=refund_logic env=omnisupport_sim model=gpt-4o-mini\n"
     "[STEP] step=1 action={\"action_type\": \"final_response\", \"text\": \"Model error.\"} reward=0.01 done=true error=null\n"
     "[END] success=false steps=1 score=0.01 rewards=0.01\n"
-    "[START] task=fraud_mitigation env=omnisupport_sim model=Qwen/Qwen2.5-72B-Instruct\n"
+    "[START] task=fraud_mitigation env=omnisupport_sim model=gpt-4o-mini\n"
     "[STEP] step=1 action={\"action_type\": \"final_response\", \"text\": \"Model error.\"} reward=0.01 done=true error=null\n"
     "[END] success=false steps=1 score=0.01 rewards=0.01"
 )
