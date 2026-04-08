@@ -63,12 +63,15 @@ args, unknown = parser.parse_known_args()
 ENV_URL = args.url_arg or os.getenv("ENV_URL", "http://localhost:8000")
 BENCHMARK = os.getenv("OMNISUPPORT_BENCHMARK", "omnisupport_sim")
 
-# ── Configuration — exactly matches judge's sample inference script ──
-# Priority: 'API_KEY' (injected by judge) must come FIRST.
-# In HF Spaces, 'HF_TOKEN' is auto-set but might point to the Hub, not the proxy.
-API_BASE_URL = os.getenv("API_BASE_URL") or "http://localhost:1234/v1"
-API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN") or "dummy-key"
-MODEL_NAME = os.getenv("MODEL_NAME") or "gpt-4o-mini"
+# ── Configuration (Mandatory env vars — explicitly declared for judge compliance) ──
+# Defaults are set ONLY for API_BASE_URL and MODEL_NAME as per checklist.
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:1234/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+HF_TOKEN = os.getenv("HF_TOKEN")  # No default value
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # Optional
+
+# Use Priority: API_KEY (Judge) > HF_TOKEN (Platform) > dummy-key
+API_KEY = os.getenv("API_KEY") or HF_TOKEN or "dummy-key"
 
 # ── ALL 5 Tasks — must match openenv.yaml task_ids ──
 TASK_IDS = ["order_check", "refund_logic", "fraud_mitigation", "fraud_prevention", "escalation_required"]
