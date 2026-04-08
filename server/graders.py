@@ -215,8 +215,12 @@ GRADERS = {
 }
 
 def grade(state: dict, task_id: str) -> float:
-    """Route to the correct grader based on task_id."""
+    \"\"\"Route to the correct grader and map score into strictly (0, 1) range.\"\"\"
     grader = GRADERS.get(task_id)
     if grader is None:
-        raise ValueError(f"Unknown task_id: {task_id}. Available: {list(GRADERS.keys())}")
-    return grader(state)
+        raise ValueError(f"Unknown task_id: {task_id}")
+    
+    raw_score = grader(state)
+    # Map [0, 1] to [0.05, 0.95] for contest compliance
+    mapped_score = 0.01 + (raw_score * 0.98)
+    return round(mapped_score, 3)
