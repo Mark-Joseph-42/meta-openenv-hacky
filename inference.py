@@ -24,6 +24,15 @@ if os.path.basename(current_dir) == "omnisupport_sim":
 
 from client import OmniSupportEnv
 
+try:
+    from omnisupport_sim.models import OmniSupportObservation
+except ImportError:
+    try:
+        from models import OmniSupportObservation
+    except ImportError:
+        # Fallback if pathing still issues
+        pass
+
 # ── Configuration ──
 API_BASE_URL = os.getenv("API_BASE_URL") or "http://localhost:1234/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "qwen3.5-4b-python-coder"
@@ -82,20 +91,17 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
 
 
-def llm_decide(observation: dict, error_msg: Optional[str]) -> str:
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-    ]
-    if error_msg:
-        messages.append({
-            "role": "user",
-            "content": f"Current ticket observation:\n{json.dumps(observation, indent=2)}\n\nThe last action resulted in an error:\n{error_msg}\n\nWhat is your next action? Respond with JSON only."
-        })
-    else:
-        messages.append({
-            "role": "user",
-            "content": f"Current ticket observation:\n{json.dumps(observation, indent=2)}\n\nWhat is your next action? Respond with JSON only."
-        })
+# Consolidated into get_agent_action
+
+async def get_agent_action(obs: OmniSupportObservation, history: List[dict]) -> str:
+    """Query the LLM and extract a structured action."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # Add history for context
+    for entry in history:
+        messages.append({"role": "user", "content": f"Output from last tool: {json.dumps(entry.get('last_tool_output', {}))}"})
+    
+    # Add current observation
+    messages.append({"role": "user", "content": f"Current Observation: {obs.model_dump_json()}"})
 
     try:
         response = client.chat.completions.create(
@@ -106,19 +112,55 @@ def llm_decide(observation: dict, error_msg: Optional[str]) -> str:
             stream=False,
         )
         content = (response.choices[0].message.content or "").strip()
-        # Extract JSON from response (handle markdown code blocks)
-        if "```" in content:
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-        # Test parse
-        action = json.loads(content)
-        return json.dumps(action) # ensure single line format for stdout string
+        
+        # ── Extraction Logic ──
+        cleaned_content = content
+        if "```" in cleaned_content:
+            # Multi-block check: take the first JSON-like block
+            blocks = cleaned_content.split("```")
+            for block in blocks:
+                if "{" in block and "}" in block:
+                    cleaned_content = block
+                    if cleaned_content.startswith("json"):
+                        cleaned_content = cleaned_content[4:]
+                    break
+        
+        cleaned_content = cleaned_content.strip()
+
+        try:
+            action = json.loads(cleaned_content)
+            return json.dumps(action)
+        except json.JSONDecodeError as je:
+            # LOG RAW OUTPUT ON FAILURE (to stderr for visibility in console)
+            print(f"\n[DEBUG] LLM returned non-JSON content. Raw output follows:\n{'-'*40}\n{content}\n{'-'*40}", file=sys.stderr)
+            raise je
+
     except Exception as e:
         # Fallback closure if JSON parse or LLM fails
         default_action = {"action_type": "final_response", "text": f"Unable to process at this time. Error: {str(e)}"}
         return json.dumps(default_action)
+
+
+async def check_connectivity():
+    """Verify that both the LLM and Env server are reachable."""
+    print("Checking connectivity...", file=sys.stderr)
+    
+    # 1. Check Env
+    try:
+        from client import OmniSupportEnv
+        test_env = OmniSupportEnv(base_url=ENV_URL)
+        await test_env.reset()
+        print(f"  [OK] Environment server at {ENV_URL} is reachable.", file=sys.stderr)
+        await test_env.close()
+    except Exception as e:
+        print(f"  [ERROR] Environment server at {ENV_URL} is NOT reachable: {e}", file=sys.stderr)
+
+    # 2. Check LLM
+    try:
+        client.models.list()
+        print(f"  [OK] LLM server at {API_BASE_URL} is reachable.", file=sys.stderr)
+    except Exception as e:
+        print(f"  [ERROR] LLM server at {API_BASE_URL} is NOT reachable: {e}", file=sys.stderr)
 
 
 async def main() -> None:
@@ -136,6 +178,7 @@ async def main() -> None:
     score = 0.0
     success = False
 
+    await check_connectivity()
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
     try:
@@ -148,7 +191,7 @@ async def main() -> None:
             if result.done:
                 break
 
-            action_json_str = llm_decide(last_obs, last_error)
+            action_json_str = await get_agent_action(result.observation, history)
 
             try:
                 # Use TypeAdapter for standard Pydantic V2 Union validation
