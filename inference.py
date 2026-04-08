@@ -54,23 +54,44 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY") or "dummy-key"
 
+# ── CLI Args (for local testing only — evaluator overrides via env vars) ──
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("url_arg", nargs="?", default=None)
-parser.add_argument("--task", default=None)  # kept for compatibility but overridden by TASK_IDS loop
+parser.add_argument("--task", default=None)
+parser.add_argument("--api-base", default=None)
+parser.add_argument("--api-key", default=None)
 args, unknown = parser.parse_known_args()
 
 ENV_URL = args.url_arg or os.getenv("ENV_URL", "http://localhost:8000")
 BENCHMARK = os.getenv("OMNISUPPORT_BENCHMARK", "omnisupport_sim")
 
-# ── ALL 5 Tasks — required by evaluator ──
-TASK_IDS = ["order_check", "refund_logic", "fraud_mitigation", "fraud_prevention", "escalation_required"]
+# ── Configuration: PRIORITY = env vars > CLI args > local dev default ──
+# The hackathon evaluator ALWAYS injects API_BASE_URL and API_KEY as env vars.
+# We MUST use those when present so our calls go through their LiteLLM proxy.
+API_BASE_URL = (
+    os.getenv("API_BASE_URL")           # 1. Evaluator-injected (REQUIRED for judge)
+    or args.api_base                    # 2. CLI override (local testing)
+    or "http://localhost:1234/v1"       # 3. Local LM Studio fallback
+)
+API_KEY = (
+    os.getenv("API_KEY")                # 1. Evaluator-injected (REQUIRED for judge)
+    or os.getenv("HF_TOKEN")           # 2. HF Space token
+    or os.getenv("OPENAI_API_KEY")     # 3. OpenAI key
+    or args.api_key                    # 4. CLI override
+    or "dummy-key"                     # 5. Local dev fallback
+)
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+
+# ── ALL 3 Tasks — must match openenv.yaml task_ids ──
+TASK_IDS = ["order_check", "refund_logic", "fraud_mitigation"]
 
 TIMEOUT_MINUTES = 19  # Hard limit: evaluator kills after 20 min
 MAX_STEPS = 15
 SUCCESS_SCORE_THRESHOLD = 0.5
 
 client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
 
 # ── Task-specific system prompts for better SOP compliance ──────────────────
 
