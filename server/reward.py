@@ -66,10 +66,12 @@ class RewardCalculator:
         # ── Contest-Compliant Linear Mapping ──
         # Judge requires strictly (0, 1). 
         # We map the raw range [-2.0, 1.0] onto [0.01, 0.99]
-        # This preserves the 'up/down' signal for RL while satisfying the validator.
         mapped_reward = 0.01 + ((reward + 2.0) / 3.0) * 0.98
         
-        self.total_reward += reward # Keep internal total_reward raw for terminal math
+        # ── IRON CAP: Final Safety Boundary ──
+        mapped_reward = max(0.01, min(0.99, mapped_reward))
+        
+        self.total_reward += reward 
         return round(mapped_reward, 3)
 
     def compute_destructive_penalty(self) -> float:
