@@ -49,10 +49,7 @@ try:
 except Exception:
     _action_adapter = None
 
-# ── Configuration (Mandatory env vars — evaluator always overrides these) ──
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY") or "dummy-key"
+
 
 # ── CLI Args (for local testing only — evaluator overrides via env vars) ──
 import argparse
@@ -74,13 +71,7 @@ API_BASE_URL = (
     or args.api_base                    # 2. CLI override (local testing)
     or "http://localhost:1234/v1"       # 3. Local LM Studio fallback
 )
-API_KEY = (
-    os.getenv("API_KEY")                # 1. Evaluator-injected (REQUIRED for judge)
-    or os.getenv("HF_TOKEN")           # 2. HF Space token
-    or os.getenv("OPENAI_API_KEY")     # 3. OpenAI key
-    or args.api_key                    # 4. CLI override
-    or "dummy-key"                     # 5. Local dev fallback
-)
+API_KEY = os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY") or args.api_key or "dummy-key"
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 
 # ── ALL 3 Tasks — must match openenv.yaml task_ids ──
