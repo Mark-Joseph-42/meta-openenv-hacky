@@ -34,12 +34,13 @@ if current_dir not in sys.path:
 from client import OmniSupportEnv
 
 try:
-    from omnisupport_sim.models import OmniSupportObservation
+    from omnisupport_sim.models import OmniSupportAction, OmniSupportObservation
 except ImportError:
     try:
-        from models import OmniSupportObservation
+        from models import OmniSupportAction, OmniSupportObservation
     except ImportError:
-        pass
+        OmniSupportAction = None
+        OmniSupportObservation = None
 
 # ── Configuration (Mandatory env vars with sensible cloud defaults) ──
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
@@ -64,41 +65,82 @@ SUCCESS_SCORE_THRESHOLD = 0.5
 
 client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-SYSTEM_PROMPT = textwrap.dedent(
-    """
+# ── Task-specific system prompts for better SOP compliance ──────────────────
+
+_PROMPT_BASE = textwrap.dedent("""
     You are a Tier-2 Support AI. You solve tickets using JSON tool calls.
+    Reply with ONE JSON object only — no explanation, no markdown, no extra text.
 
-    TOOLS:
-    1. search_db: query (string) - Search orders or tracking IDs.
-    2. verify_policy: topic (string) - Topics: refund_eligibility, return_verification.
-    3. execute_action: cmd ("issue_refund"), params (dict with order_id).
-    4. final_response: text (string) - Professional summary to customer.
+    AVAILABLE TOOLS (use exactly these action_type values):
+    - {"action_type": "search_db", "query": "<order_id or customer_id or tracking_id>"}
+    - {"action_type": "verify_policy", "topic": "<topic>"}
+    - {"action_type": "execute_action", "cmd": "issue_refund", "params": {"order_id": "<id>"}}
+    - {"action_type": "final_response", "text": "<single paragraph, no newlines>"}
+""").strip()
 
-    FORMATTING CONSTRAINTS:
-    - You MUST NOT use newlines in your FinalResponse.
-    - Write your response as a single, concise paragraph using full stops.
+_PROMPT_ORDER_CHECK = _PROMPT_BASE + textwrap.dedent("""
 
-    FINANCIAL & TIME CONSTRAINTS (Current Date: April 2, 2026):
-    - Auto-refunds are STRICTLY limited to $500.
-    - Standard customers: Purchase date must be < 14 days ago.
-    - LOYALTY-GOLD members: Purchase date must be < 30 days ago.
-    - If either limit (Time or Money) is exceeded, you MUST NOT issue a refund.
-    - RISK RULE: If the order has a 'FRAUD FLAG' in the notes, DENY the refund.
+    YOUR TASK: STATUS INQUIRY ONLY — do NOT issue any refunds.
+    The customer wants to know the status of their MOST RECENT order.
 
-    STRICT SOP:
-    1. Search Order ID or Customer ID.
-    2. If a tracking_id is found, MUST search that tracking_id to check Carrier status.
-    3. MANDATORY: MUST use 'verify_policy' for every ticket before taking action.
-       For Task 3 (Conflict), use 'return_verification'.
-    4. Provide a CONCISE professional FinalResponse when done.
+    MANDATORY STEPS (in order):
+    1. search_db with the customer ID (e.g. "cust_882") to get all their orders.
+    2. Identify the order with the LATEST purchase_date.
+    3. final_response stating the status of that most recent order clearly.
 
-    EXAMPLES:
-    - {"action_type": "search_db", "query": "4829"}
-    - {"action_type": "verify_policy", "topic": "refund_eligibility"}
-    - {"action_type": "execute_action", "cmd": "issue_refund", "params": {"order_id": "4829"}}
-    - {"action_type": "final_response", "text": "Refund issued. Details..."}
-    """
-).strip()
+    EXAMPLE OUTPUT:
+    Step 1: {"action_type": "search_db", "query": "cust_882"}
+    Step 2: {"action_type": "final_response", "text": "Your most recent order is [item] (order #[id]), currently showing status: [status]."}
+""").strip()
+
+_PROMPT_REFUND_LOGIC = _PROMPT_BASE + textwrap.dedent("""
+
+    YOUR TASK: REFUND REQUEST — customer claims item is damaged.
+
+    MANDATORY STEPS (in order — do not skip any):
+    1. search_db with the order ID from the ticket.
+    2. verify_policy with topic "refund_eligibility" (REQUIRED before any refund).
+    3. If eligible (value < $500, within time window, no FRAUD FLAG): execute_action issue_refund.
+    4. final_response with outcome.
+
+    RULES:
+    - LOYALTY-GOLD members: 30-day window. Standard: 14-day window.
+    - Value must be under $500 for auto-refund.
+    - FRAUD FLAG in notes = DENY refund immediately.
+    - You MUST call verify_policy with "refund_eligibility" — not any other topic.
+
+    EXAMPLE:
+    {"action_type": "verify_policy", "topic": "refund_eligibility"}
+""").strip()
+
+_PROMPT_FRAUD_MITIGATION = _PROMPT_BASE + textwrap.dedent("""
+
+    YOUR TASK: CONFLICT RECONCILIATION — customer says they returned an item but no refund received.
+
+    MANDATORY STEPS (in order — do not skip any):
+    1. search_db with the order ID to get the tracking_id.
+    2. search_db with the tracking_id (e.g. "TRK-XXXX-XX") to check carrier delivery status.
+    3. verify_policy with topic "return_verification" (REQUIRED before any refund).
+    4. Only if carrier status is "Delivered": execute_action issue_refund.
+    5. final_response with outcome.
+
+    CRITICAL: You MUST check the carrier (step 2) AND verify policy (step 3) BEFORE issuing any refund.
+    Skipping either step results in SCORE 0.0.
+
+    EXAMPLE:
+    {"action_type": "search_db", "query": "TRK-9928-XZ"}
+    {"action_type": "verify_policy", "topic": "return_verification"}
+""").strip()
+
+TASK_PROMPTS = {
+    "order_check":       _PROMPT_ORDER_CHECK,
+    "refund_logic":      _PROMPT_REFUND_LOGIC,
+    "fraud_mitigation":  _PROMPT_FRAUD_MITIGATION,
+}
+
+# Fallback for unknown tasks
+def get_system_prompt(task_name: str) -> str:
+    return TASK_PROMPTS.get(task_name, _PROMPT_REFUND_LOGIC)
 
 
 # ── Score Utilities ──────────────────────────────────────────────────────────
@@ -147,9 +189,9 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 
 # ── Agent Logic ───────────────────────────────────────────────────────────────
 
-async def get_agent_action(obs: OmniSupportObservation, history: List[dict]) -> str:
+async def get_agent_action(obs: OmniSupportObservation, history: List[dict], task_name: str = "refund_logic") -> str:
     """Query the LLM and extract a structured action."""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": get_system_prompt(task_name)}]
 
     # Inject conversation history (action + tool result pairs)
     for entry in history:
@@ -286,12 +328,14 @@ async def run_single_task(task_name: str) -> None:
             if result.done:
                 break
 
-            action_json_str = await get_agent_action(result.observation, history)
+            action_json_str = await get_agent_action(result.observation, history, task_name)
 
             try:
-                from pydantic import TypeAdapter
-                adapter = TypeAdapter(OmniSupportEnv.action_type)
-                action_obj = adapter.validate_json(action_json_str)
+                if OmniSupportAction is not None:
+                    action_obj = OmniSupportAction.model_validate_json(action_json_str)
+                else:
+                    # Fallback: pass raw dict
+                    action_obj = OmniSupportEnv.action_type.model_validate_json(action_json_str)
 
                 result = await env.step(action_obj)
 
@@ -305,6 +349,7 @@ async def run_single_task(task_name: str) -> None:
                 reward = 0.0
                 done = False
                 step_error = str(e).replace("\n", " ").replace("\r", "")
+                print(f"[DEBUG] Step {step} error (task={task_name}): {step_error}", file=sys.stderr)
 
             rewards.append(reward)
             steps_taken = step
