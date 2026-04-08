@@ -200,7 +200,11 @@ class OmniSupportEnvironment:
             grader_score = grade(self._state.model_dump(), self._state.current_task_id)
             self._state.grader_score = grader_score
             terminal_reward = self.reward_calc.compute_terminal_reward(grader_score)
-            step_reward += terminal_reward
+            
+            # ── IRON-CLAD ISOLATION ──
+            # On the final step, we replace the step_reward with the terminal_reward
+            # to prevent 'Summation Overflow' (e.g. 0.7 + 0.99 = 1.69)
+            step_reward = terminal_reward
 
         self._state.reward_accumulated += step_reward
         self._state.done = done
