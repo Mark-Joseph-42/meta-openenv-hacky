@@ -1,3 +1,14 @@
+---
+title: OmniSupport-Sim
+emoji: 🧠
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+pinned: true
+license: mit
+short_description: "5-task adversarial customer support simulation environment for LLM agents (Meta PyTorch Hackathon)"
+---
+
 # 🧠 OmniSupport-Sim
 
 > **A high-fidelity, adversarially-designed customer support simulation environment for the Meta PyTorch Hackathon (OpenEnv Track)**
